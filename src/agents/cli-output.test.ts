@@ -101,6 +101,50 @@ describe("parseCliJsonl", () => {
     });
   });
 
+  it("ignores Codex user and partial assistant message items when extracting final output", () => {
+    const result = parseCliJsonl(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-321" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "User prompt" }],
+          },
+        }),
+        JSON.stringify({
+          type: "item.delta",
+          item: {
+            type: "message_delta",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Partial answer" }],
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Final answer" }],
+          },
+        }),
+      ].join("\n"),
+      {
+        command: "codex",
+        output: "jsonl",
+        sessionIdFields: ["thread_id"],
+      },
+      "codex-cli",
+    );
+
+    expect(result).toEqual({
+      text: "Final answer",
+      sessionId: "thread-321",
+      usage: undefined,
+    });
+  });
+
   it("preserves Codex thread metadata without leaking raw JSONL when no message text exists", () => {
     const raw = [
       JSON.stringify({ type: "thread.started", thread_id: "thread-789" }),
