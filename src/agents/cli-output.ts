@@ -68,7 +68,7 @@ function collectCliJsonlItemText(params: {
     return "";
   }
   const itemType = typeof params.item.type === "string" ? params.item.type.toLowerCase() : "";
-  if (itemType && itemType !== "message") {
+  if (itemType && itemType !== "message" && itemType !== "agent_message") {
     return "";
   }
   const role = typeof params.item.role === "string" ? params.item.role.toLowerCase() : "";
