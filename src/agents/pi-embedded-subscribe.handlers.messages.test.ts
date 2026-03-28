@@ -99,6 +99,23 @@ describe("filterBlockReplyMediaDuplicates", () => {
       replyToCurrent: undefined,
     });
   });
+
+  it("keeps only unsent screenshots in block reply media arrays", () => {
+    expect(
+      filterBlockReplyMediaDuplicates({
+        text: "",
+        mediaUrls: ["file:///tmp/screenshot-1.png", "file:///tmp/screenshot-2.png"],
+        sentMediaUrls: ["file:///tmp/screenshot-1.png"],
+      }),
+    ).toEqual({
+      text: "",
+      mediaUrls: ["file:///tmp/screenshot-2.png"],
+      audioAsVoice: undefined,
+      replyToId: undefined,
+      replyToTag: undefined,
+      replyToCurrent: undefined,
+    });
+  });
 });
 
 describe("consumePendingToolMediaIntoReply", () => {
