@@ -9,14 +9,14 @@ import {
   toPluginMessageContext,
   toPluginMessageSentEvent,
 } from "openclaw/plugin-sdk/hook-runtime";
+import { formatErrorMessage } from "openclaw/plugin-sdk/infra-runtime";
 import { buildOutboundMediaLoadOptions } from "openclaw/plugin-sdk/media-runtime";
 import { isGifMedia, kindFromMime } from "openclaw/plugin-sdk/media-runtime";
 import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
 import { chunkMarkdownTextWithMode, type ChunkMode } from "openclaw/plugin-sdk/reply-runtime";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
-import { danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
-import { formatErrorMessage } from "openclaw/plugin-sdk/ssrf-runtime";
+import { createSubsystemLogger, danger, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { loadWebMedia } from "openclaw/plugin-sdk/web-media";
 import type { TelegramInlineButtons } from "../button-types.js";
 import { splitTelegramCaption } from "../caption.js";
@@ -26,6 +26,7 @@ import {
   renderTelegramHtmlText,
   wrapFileReferencesInHtml,
 } from "../format.js";
+import { consumeRecentMessageToolMediaDuplicates } from "../recent-tool-media-dedupe.js";
 import { buildInlineKeyboard } from "../send.js";
 import { resolveTelegramVoiceSend } from "../voice.js";
 import {
@@ -45,6 +46,36 @@ const VOICE_FORBIDDEN_RE = /VOICE_MESSAGES_FORBIDDEN/;
 const CAPTION_TOO_LONG_RE = /caption is too long/i;
 const GrammyErrorCtor: typeof GrammyError | undefined =
   typeof GrammyError === "function" ? GrammyError : undefined;
+const outboundLogger = createSubsystemLogger("telegram/outbound");
+const TELEGRAM_OUTBOUND_LOG_PREFIX = "[tg_reply_media]";
+const TELEGRAM_REPLY_MEDIA_TRACE_LOG_PREFIX = "[tg_reply_media_trace]";
+const TELEGRAM_REPLY_MEDIA_DEDUPE_LOG_PREFIX = "[tg_reply_media_dedupe]";
+const DEBUG_BUILD_MARKER_LOG_PREFIX = "[debug_build_marker]";
+const DEBUG_BUILD_MARKER_VERSION = "draft-trace-2026-03-27-v1";
+const DEBUG_CRASH_BEFORE_REPLY_MEDIA_ENV = "OPENCLAW_TELEGRAM_DEBUG_CRASH_BEFORE_REPLY_MEDIA";
+let didLogDebugBuildMarker = false;
+
+function logDebugBuildMarker(): void {
+  if (didLogDebugBuildMarker) {
+    return;
+  }
+  didLogDebugBuildMarker = true;
+  logVerbose(
+    `${DEBUG_BUILD_MARKER_LOG_PREFIX} ${DEBUG_BUILD_MARKER_VERSION} source=telegram.delivery.replies`,
+  );
+}
+
+function logTelegramOutbound(params: {
+  chatId: string;
+  operation: string;
+  messageId: number;
+  mediaUrl?: string;
+}): void {
+  const suffix = params.mediaUrl ? ` media=${params.mediaUrl}` : "";
+  outboundLogger.info(
+    `${TELEGRAM_OUTBOUND_LOG_PREFIX} ${params.operation} ok chat=${params.chatId} message=${params.messageId}${suffix}`,
+  );
+}
 
 type DeliveryProgress = ReplyThreadDeliveryProgress & {
   deliveredCount: number;
@@ -92,12 +123,6 @@ function markDelivered(progress: DeliveryProgress): void {
   progress.deliveredCount += 1;
 }
 
-function filterEmptyTelegramTextChunks<T extends { text: string }>(chunks: readonly T[]): T[] {
-  // Telegram rejects whitespace-only text payloads; drop them before sendMessage so
-  // hook-mutated or model-emitted empty replies become a no-op instead of a 400.
-  return chunks.filter((chunk) => chunk.text.trim().length > 0);
-}
-
 async function deliverTextReply(params: {
   bot: Bot;
   chatId: string;
@@ -114,9 +139,8 @@ async function deliverTextReply(params: {
   progress: DeliveryProgress;
 }): Promise<number | undefined> {
   let firstDeliveredMessageId: number | undefined;
-  const chunks = filterEmptyTelegramTextChunks(params.chunkText(params.replyText));
   await sendChunkedTelegramReplyText({
-    chunks,
+    chunks: params.chunkText(params.replyText),
     progress: params.progress,
     replyToId: params.replyToId,
     replyToMode: params.replyToMode,
@@ -162,9 +186,8 @@ async function sendPendingFollowUpText(params: {
   replyToMode: ReplyToMode;
   progress: DeliveryProgress;
 }): Promise<void> {
-  const chunks = filterEmptyTelegramTextChunks(params.chunkText(params.text));
   await sendChunkedTelegramReplyText({
-    chunks,
+    chunks: params.chunkText(params.text),
     progress: params.progress,
     replyToId: params.replyToId,
     replyToMode: params.replyToMode,
@@ -212,7 +235,7 @@ async function sendTelegramVoiceFallbackText(opts: {
   replyQuoteText?: string;
 }): Promise<number | undefined> {
   let firstDeliveredMessageId: number | undefined;
-  const chunks = filterEmptyTelegramTextChunks(opts.chunkText(opts.text));
+  const chunks = opts.chunkText(opts.text);
   let appliedReplyTo = false;
   for (let i = 0; i < chunks.length; i += 1) {
     const chunk = chunks[i];
@@ -258,6 +281,7 @@ async function deliverMediaReply(params: {
   replyToMode: ReplyToMode;
   progress: DeliveryProgress;
 }): Promise<number | undefined> {
+  logDebugBuildMarker();
   let firstDeliveredMessageId: number | undefined;
   let first = true;
   let pendingFollowUpText: string | undefined;
@@ -300,6 +324,29 @@ async function deliverMediaReply(params: {
         silent: params.silent,
       }),
     };
+    logVerbose(
+      `${TELEGRAM_REPLY_MEDIA_TRACE_LOG_PREFIX} ${JSON.stringify({
+        phase: "deliverMediaReply:beforeSend",
+        chatId: params.chatId,
+        mediaUrl,
+        replyText: params.reply.text,
+        mediaList: params.mediaList,
+        replyToMessageId,
+        hasThread: Boolean(params.thread),
+        stack: new Error("tg_reply_media_trace").stack,
+      })}`,
+    );
+    if (process.env[DEBUG_CRASH_BEFORE_REPLY_MEDIA_ENV] === "1") {
+      throw new Error(
+        `telegram debug crash before reply media send: ${JSON.stringify({
+          chatId: params.chatId,
+          mediaUrl,
+          mediaList: params.mediaList,
+          replyText: params.reply.text,
+          replyToMessageId,
+        })}`,
+      );
+    }
     if (isGif) {
       const result = await sendTelegramWithThreadFallback({
         operation: "sendAnimation",
@@ -312,6 +359,12 @@ async function deliverMediaReply(params: {
       if (firstDeliveredMessageId == null) {
         firstDeliveredMessageId = result.message_id;
       }
+      logTelegramOutbound({
+        chatId: params.chatId,
+        operation: "sendAnimation",
+        messageId: result.message_id,
+        mediaUrl,
+      });
       markDelivered(params.progress);
     } else if (kind === "image") {
       const result = await sendTelegramWithThreadFallback({
@@ -325,6 +378,12 @@ async function deliverMediaReply(params: {
       if (firstDeliveredMessageId == null) {
         firstDeliveredMessageId = result.message_id;
       }
+      logTelegramOutbound({
+        chatId: params.chatId,
+        operation: "sendPhoto",
+        messageId: result.message_id,
+        mediaUrl,
+      });
       markDelivered(params.progress);
     } else if (kind === "video") {
       const result = await sendTelegramWithThreadFallback({
@@ -338,6 +397,12 @@ async function deliverMediaReply(params: {
       if (firstDeliveredMessageId == null) {
         firstDeliveredMessageId = result.message_id;
       }
+      logTelegramOutbound({
+        chatId: params.chatId,
+        operation: "sendVideo",
+        messageId: result.message_id,
+        mediaUrl,
+      });
       markDelivered(params.progress);
     } else if (kind === "audio") {
       const { useVoice } = resolveTelegramVoiceSend({
@@ -363,6 +428,12 @@ async function deliverMediaReply(params: {
           if (firstDeliveredMessageId == null) {
             firstDeliveredMessageId = result.message_id;
           }
+          logTelegramOutbound({
+            chatId: params.chatId,
+            operation: "sendVoice",
+            messageId: result.message_id,
+            mediaUrl,
+          });
           markDelivered(params.progress);
         };
         await params.onVoiceRecording?.();
@@ -456,6 +527,12 @@ async function deliverMediaReply(params: {
       if (firstDeliveredMessageId == null) {
         firstDeliveredMessageId = result.message_id;
       }
+      logTelegramOutbound({
+        chatId: params.chatId,
+        operation: "sendDocument",
+        messageId: result.message_id,
+        mediaUrl,
+      });
       markDelivered(params.progress);
     }
     markReplyApplied(params.progress, replyToMessageId);
@@ -597,6 +674,7 @@ export async function deliverReplies(params: {
   /** Override media loader (tests). */
   mediaLoader?: typeof loadWebMedia;
 }): Promise<{ delivered: boolean }> {
+  logDebugBuildMarker();
   const progress: DeliveryProgress = {
     hasReplied: false,
     hasDelivered: false,
@@ -618,8 +696,37 @@ export async function deliverReplies(params: {
       : reply?.mediaUrl
         ? [reply.mediaUrl]
         : [];
-    const hasMedia = mediaList.length > 0;
+    const dedupedMedia = consumeRecentMessageToolMediaDuplicates({
+      chatId: params.chatId,
+      mediaUrls: mediaList,
+    });
+    if (dedupedMedia.removedMediaUrls.length > 0) {
+      logVerbose(
+        `${TELEGRAM_REPLY_MEDIA_DEDUPE_LOG_PREFIX} ${JSON.stringify({
+          phase: "deliverReplies:filtered",
+          chatId: params.chatId,
+          removedMediaUrls: dedupedMedia.removedMediaUrls,
+          keptMediaUrls: dedupedMedia.keptMediaUrls,
+          replyText: reply?.text,
+        })}`,
+      );
+      reply = {
+        ...reply,
+        mediaUrl: dedupedMedia.keptMediaUrls[0],
+        mediaUrls: dedupedMedia.keptMediaUrls.length ? dedupedMedia.keptMediaUrls : undefined,
+      };
+    }
+    const hasMedia = dedupedMedia.keptMediaUrls.length > 0;
     if (!reply?.text && !hasMedia) {
+      if (mediaList.length > 0 && dedupedMedia.removedMediaUrls.length > 0) {
+        outboundLogger.info(
+          `${TELEGRAM_REPLY_MEDIA_DEDUPE_LOG_PREFIX} ${JSON.stringify({
+            phase: "deliverReplies:suppressed",
+            chatId: params.chatId,
+            removedMediaUrls: dedupedMedia.removedMediaUrls,
+          })}`,
+        );
+      }
       if (reply?.audioAsVoice) {
         logVerbose("telegram reply has audioAsVoice without media/text; skipping");
         continue;
@@ -664,7 +771,7 @@ export async function deliverReplies(params: {
       const shouldPinFirstMessage = telegramData?.pin === true;
       const replyMarkup = buildInlineKeyboard(telegramData?.buttons);
       let firstDeliveredMessageId: number | undefined;
-      if (mediaList.length === 0) {
+      if (dedupedMedia.keptMediaUrls.length === 0) {
         firstDeliveredMessageId = await deliverTextReply({
           bot: params.bot,
           chatId: params.chatId,
@@ -681,9 +788,19 @@ export async function deliverReplies(params: {
           progress,
         });
       } else {
+        logVerbose(
+          `${TELEGRAM_REPLY_MEDIA_TRACE_LOG_PREFIX} ${JSON.stringify({
+            phase: "deliverReplies:beforeDeliverMediaReply",
+            chatId: params.chatId,
+            mediaList: dedupedMedia.keptMediaUrls,
+            replyText: reply.text,
+            replyToId,
+            stack: new Error("tg_reply_media_entry").stack,
+          })}`,
+        );
         firstDeliveredMessageId = await deliverMediaReply({
           reply,
-          mediaList,
+          mediaList: dedupedMedia.keptMediaUrls,
           bot: params.bot,
           chatId: params.chatId,
           runtime: params.runtime,
