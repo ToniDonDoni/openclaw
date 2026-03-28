@@ -1,7 +1,7 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
-import { filterMessagingToolMediaDuplicates } from "../auto-reply/reply/reply-payloads-dedupe.js";
+import { filterSentMediaUrls } from "../auto-reply/reply/reply-payloads-dedupe.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
 import { logVerbose } from "../globals.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
@@ -182,13 +182,11 @@ export function filterBlockReplyMediaDuplicates(params: {
     };
   }
 
-  const [filteredPayload] = filterMessagingToolMediaDuplicates({
-    payloads: [{ text: params.text, mediaUrls: params.mediaUrls }],
+  const filteredMediaUrls = filterSentMediaUrls({
+    mediaUrls: params.mediaUrls,
     sentMediaUrls: params.sentMediaUrls,
   });
-  const outputMediaUrls = filteredPayload?.mediaUrls?.length
-    ? filteredPayload.mediaUrls
-    : undefined;
+  const outputMediaUrls = filteredMediaUrls.length > 0 ? filteredMediaUrls : undefined;
   const removedMediaUrls = (params.mediaUrls ?? []).filter(
     (url) => !new Set(outputMediaUrls ?? []).has(url),
   );

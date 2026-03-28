@@ -6,6 +6,25 @@ import { normalizeTargetForProvider } from "../../infra/outbound/target-normaliz
 import { normalizeOptionalAccountId } from "../../routing/account-id.js";
 import type { ReplyPayload } from "../types.js";
 
+function normalizeMediaForDedupe(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (!trimmed.toLowerCase().startsWith("file://")) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === "file:") {
+      return decodeURIComponent(parsed.pathname || "");
+    }
+  } catch {
+    // Keep fallback below for non-URL-like inputs.
+  }
+  return trimmed.replace(/^file:\/\//i, "");
+}
+
 export function filterMessagingToolDuplicates(params: {
   payloads: ReplyPayload[];
   sentTexts: string[];
@@ -17,39 +36,32 @@ export function filterMessagingToolDuplicates(params: {
   return payloads.filter((payload) => !isMessagingToolDuplicate(payload.text ?? "", sentTexts));
 }
 
+export function filterSentMediaUrls(params: {
+  mediaUrls: string[];
+  sentMediaUrls: string[];
+}): string[] {
+  if (params.mediaUrls.length === 0 || params.sentMediaUrls.length === 0) {
+    return params.mediaUrls;
+  }
+  const sentSet = new Set(params.sentMediaUrls.map(normalizeMediaForDedupe).filter(Boolean));
+  return params.mediaUrls.filter((url) => !sentSet.has(normalizeMediaForDedupe(url)));
+}
+
 export function filterMessagingToolMediaDuplicates(params: {
   payloads: ReplyPayload[];
   sentMediaUrls: string[];
 }): ReplyPayload[] {
-  const normalizeMediaForDedupe = (value: string): string => {
-    const trimmed = value.trim();
-    if (!trimmed) {
-      return "";
-    }
-    if (!trimmed.toLowerCase().startsWith("file://")) {
-      return trimmed;
-    }
-    try {
-      const parsed = new URL(trimmed);
-      if (parsed.protocol === "file:") {
-        return decodeURIComponent(parsed.pathname || "");
-      }
-    } catch {
-      // Keep fallback below for non-URL-like inputs.
-    }
-    return trimmed.replace(/^file:\/\//i, "");
-  };
-
   const { payloads, sentMediaUrls } = params;
   if (sentMediaUrls.length === 0) {
     return payloads;
   }
-  const sentSet = new Set(sentMediaUrls.map(normalizeMediaForDedupe).filter(Boolean));
   return payloads.map((payload) => {
     const mediaUrl = payload.mediaUrl;
     const mediaUrls = payload.mediaUrls;
-    const stripSingle = mediaUrl && sentSet.has(normalizeMediaForDedupe(mediaUrl));
-    const filteredUrls = mediaUrls?.filter((u) => !sentSet.has(normalizeMediaForDedupe(u)));
+    const stripSingle =
+      typeof mediaUrl === "string" &&
+      filterSentMediaUrls({ mediaUrls: [mediaUrl], sentMediaUrls }).length === 0;
+    const filteredUrls = mediaUrls ? filterSentMediaUrls({ mediaUrls, sentMediaUrls }) : undefined;
     if (!stripSingle && (!mediaUrls || filteredUrls?.length === mediaUrls.length)) {
       return payload;
     }
