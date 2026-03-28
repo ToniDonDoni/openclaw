@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseCliJsonl } from "./cli-output.js";
+import { parseCliJsonl, parseCliOutput } from "./cli-output.js";
 
 describe("parseCliJsonl", () => {
   it("parses Claude stream-json result events", () => {
@@ -70,6 +70,80 @@ describe("parseCliJsonl", () => {
         cacheWrite: undefined,
         total: undefined,
       },
+    });
+  });
+
+  it("parses Codex message items from item.content arrays and keeps thread_id", () => {
+    const result = parseCliJsonl(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-123" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "message",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Codex says hello" }],
+          },
+        }),
+      ].join("\n"),
+      {
+        command: "codex",
+        output: "jsonl",
+        sessionIdFields: ["thread_id"],
+      },
+      "codex-cli",
+    );
+
+    expect(result).toEqual({
+      text: "Codex says hello",
+      sessionId: "thread-123",
+      usage: undefined,
+    });
+  });
+
+  it("preserves Codex thread metadata without leaking raw JSONL when no message text exists", () => {
+    const raw = [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-789" }),
+      JSON.stringify({
+        type: "item.completed",
+        item: {
+          type: "reasoning",
+          summary: [{ type: "summary_text", text: "internal summary" }],
+        },
+      }),
+    ].join("\n");
+
+    expect(
+      parseCliJsonl(
+        raw,
+        {
+          command: "codex",
+          output: "jsonl",
+          sessionIdFields: ["thread_id"],
+        },
+        "codex-cli",
+      ),
+    ).toEqual({
+      text: "",
+      sessionId: "thread-789",
+      usage: undefined,
+    });
+
+    expect(
+      parseCliOutput({
+        raw,
+        backend: {
+          command: "codex",
+          output: "jsonl",
+          sessionIdFields: ["thread_id"],
+        },
+        providerId: "codex-cli",
+        outputMode: "jsonl",
+      }),
+    ).toEqual({
+      text: "",
+      sessionId: "thread-789",
+      usage: undefined,
     });
   });
 });

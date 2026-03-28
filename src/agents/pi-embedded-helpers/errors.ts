@@ -984,6 +984,8 @@ function isCliSessionExpiredErrorMessage(raw: string): boolean {
   }
   const lower = raw.toLowerCase();
   return (
+    lower.includes("thread/resume failed") ||
+    lower.includes("no rollout found for thread id") ||
     lower.includes("session not found") ||
     lower.includes("session does not exist") ||
     lower.includes("session expired") ||
