@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolveDefaultAgentId } from "openclaw/plugin-sdk/agent-runtime";
 import {
   isNativeCommandsExplicitlyDisabled,
@@ -82,6 +83,130 @@ const DEFAULT_TELEGRAM_BOT_RUNTIME: TelegramBotRuntime = {
 };
 
 const TELEGRAM_GET_UPDATES_REQUEST_TIMEOUT_MS = 45_000;
+const DEBUG_GETUPDATES_FILE_ENV = "OPENCLAW_TELEGRAM_DEBUG_GETUPDATES_FILE";
+
+type TelegramDebugApiState = {
+  loaded: boolean;
+  updates: unknown[];
+  nextMessageId: number;
+};
+
+const telegramDebugApiState: TelegramDebugApiState = {
+  loaded: false,
+  updates: [],
+  nextMessageId: 900_000,
+};
+
+async function loadDebugTelegramUpdates(log: (line: string) => void): Promise<unknown[]> {
+  const filePath = process.env[DEBUG_GETUPDATES_FILE_ENV]?.trim();
+  if (!filePath) {
+    return [];
+  }
+  if (!telegramDebugApiState.loaded) {
+    telegramDebugApiState.loaded = true;
+    const raw = await readFile(filePath, "utf8");
+    const parsed = JSON.parse(raw) as { result?: unknown } | unknown[] | unknown;
+    const updates = Array.isArray(parsed)
+      ? parsed
+      : parsed &&
+          typeof parsed === "object" &&
+          Array.isArray((parsed as { result?: unknown }).result)
+        ? ((parsed as { result: unknown[] }).result ?? [])
+        : [parsed];
+    telegramDebugApiState.updates = updates;
+    log(`[telegram][debug_api_mock] loaded file=${filePath} updates=${updates.length}`);
+  }
+  const updates = telegramDebugApiState.updates;
+  telegramDebugApiState.updates = [];
+  return updates;
+}
+
+function jsonResponse(payload: unknown): Response {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+async function sleep(ms: number): Promise<void> {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return;
+  }
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function resolveMockGetUpdatesDelayMs(input: TelegramFetchInput, init?: TelegramFetchInit): number {
+  const body =
+    typeof init?.body === "string"
+      ? init.body
+      : init?.body instanceof URLSearchParams
+        ? init.body.toString()
+        : "";
+  const bodyTimeoutParam = new URLSearchParams(body).get("timeout");
+  let urlTimeoutParam: string | null = null;
+  const url = readRequestUrl(input);
+  if (url) {
+    try {
+      urlTimeoutParam = new URL(url).searchParams.get("timeout");
+    } catch {
+      urlTimeoutParam = null;
+    }
+  }
+  const timeoutParam = bodyTimeoutParam ?? urlTimeoutParam;
+  const timeoutSeconds = timeoutParam ? Number(timeoutParam) : NaN;
+  if (!Number.isFinite(timeoutSeconds) || timeoutSeconds <= 0) {
+    return 0;
+  }
+  return Math.min(timeoutSeconds * 1000, 1000);
+}
+
+async function maybeMockTelegramApiFetch(params: {
+  input: TelegramFetchInput;
+  init?: TelegramFetchInit;
+  log: (line: string) => void;
+}): Promise<Response | null> {
+  const filePath = process.env[DEBUG_GETUPDATES_FILE_ENV]?.trim();
+  if (!filePath) {
+    return null;
+  }
+  const method = extractTelegramApiMethod(params.input) ?? "unknown";
+  const url = readRequestUrl(params.input) ?? "";
+  const body =
+    typeof params.init?.body === "string"
+      ? params.init.body
+      : params.init?.body instanceof URLSearchParams
+        ? params.init.body.toString()
+        : "";
+
+  if (method === "getupdates") {
+    const updates = await loadDebugTelegramUpdates(params.log);
+    if (updates.length === 0) {
+      const delayMs = resolveMockGetUpdatesDelayMs(params.input, params.init);
+      if (delayMs > 0) {
+        params.log(`[telegram][debug_api_mock] method=getUpdates idle-delay-ms=${delayMs}`);
+        await sleep(delayMs);
+      }
+    }
+    params.log(`[telegram][debug_api_mock] method=getUpdates served=${updates.length}`);
+    return jsonResponse({ ok: true, result: updates });
+  }
+
+  if (method === "sendmessage" || method === "sendphoto" || method === "editmessagetext") {
+    telegramDebugApiState.nextMessageId += 1;
+    params.log(`[telegram][debug_api_mock] method=${method} url=${url} body=${body}`);
+    return jsonResponse({
+      ok: true,
+      result: {
+        message_id: telegramDebugApiState.nextMessageId,
+        date: Math.floor(Date.now() / 1000),
+        chat: { id: 1076875102, type: "private" },
+      },
+    });
+  }
+
+  params.log(`[telegram][debug_api_mock] method=${method} url=${url}`);
+  return jsonResponse({ ok: true, result: true });
+}
 
 let telegramBotRuntimeForTest: TelegramBotRuntime | undefined;
 
@@ -225,6 +350,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   if (finalFetch) {
     const baseFetch = finalFetch;
     finalFetch = ((input: TelegramFetchInput, init?: TelegramFetchInit) => {
+      const debugLog = (line: string) => logVerbose(line);
       return Promise.resolve(baseFetch(input, init)).catch((err: unknown) => {
         try {
           tagTelegramNetworkError(err, {
@@ -237,6 +363,20 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         }
         throw err;
       });
+    }) as unknown as NonNullable<ApiClientOptions["fetch"]>;
+  }
+  if (finalFetch) {
+    const baseFetch = finalFetch;
+    finalFetch = (async (input: TelegramFetchInput, init?: TelegramFetchInit) => {
+      const mocked = await maybeMockTelegramApiFetch({
+        input,
+        init,
+        log: (line) => logVerbose(line),
+      });
+      if (mocked) {
+        return mocked as unknown as Awaited<ReturnType<NonNullable<ApiClientOptions["fetch"]>>>;
+      }
+      return baseFetch(input, init);
     }) as unknown as NonNullable<ApiClientOptions["fetch"]>;
   }
 
@@ -330,7 +470,32 @@ export function createTelegramBot(opts: TelegramBotOptions) {
     }
   });
 
+  const sequentializeTraceLogger = createSubsystemLogger("gateway/channels/telegram/sequentialize");
+  bot.use(async (ctx, next) => {
+    const updateId = resolveTelegramUpdateId(ctx);
+    let key = "unknown";
+    try {
+      key = getTelegramSequentialKey(ctx);
+    } catch (error) {
+      sequentializeTraceLogger.error(
+        `[telegram][seq_trace] key:error update_id=${updateId ?? "unknown"} ${String(error)}`,
+      );
+      throw error;
+    }
+    sequentializeTraceLogger.error(
+      `[telegram][seq_trace] before update_id=${updateId ?? "unknown"} key=${key}`,
+    );
+    await next();
+  });
   bot.use(botRuntime.sequentialize(getTelegramSequentialKey));
+  bot.use(async (ctx, next) => {
+    const updateId = resolveTelegramUpdateId(ctx);
+    const key = getTelegramSequentialKey(ctx);
+    sequentializeTraceLogger.error(
+      `[telegram][seq_trace] after update_id=${updateId ?? "unknown"} key=${key}`,
+    );
+    await next();
+  });
 
   const rawUpdateLogger = createSubsystemLogger("gateway/channels/telegram/raw-update");
   const MAX_RAW_UPDATE_CHARS = 8000;
@@ -359,6 +524,10 @@ export function createTelegramBot(opts: TelegramBotOptions) {
   };
 
   bot.use(async (ctx, next) => {
+    const updateId = resolveTelegramUpdateId(ctx);
+    rawUpdateLogger.error(
+      `[telegram][raw_update_trace] start update_id=${updateId ?? "unknown"} keys=${Object.keys(ctx.update ?? {}).join(",")}`,
+    );
     if (shouldLogVerbose()) {
       try {
         const raw = stringifyUpdate(ctx.update);
@@ -369,7 +538,15 @@ export function createTelegramBot(opts: TelegramBotOptions) {
         rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
       }
     }
-    await next();
+    try {
+      await next();
+      rawUpdateLogger.error(`[telegram][raw_update_trace] done update_id=${updateId ?? "unknown"}`);
+    } catch (error) {
+      rawUpdateLogger.error(
+        `[telegram][raw_update_trace] error update_id=${updateId ?? "unknown"} ${String(error)}`,
+      );
+      throw error;
+    }
   });
 
   const historyLimit = Math.max(

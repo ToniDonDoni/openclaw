@@ -79,6 +79,11 @@ export type AgentRunLoopResult =
     }
   | { kind: "final"; payload: ReplyPayload };
 
+const CODEX_TOOL_START_LOG_PREFIX = "[codex_tool_start]";
+const CODEX_TOOL_UPDATE_LOG_PREFIX = "[codex_tool_update]";
+const CODEX_TOOL_RESULT_LOG_PREFIX = "[codex_tool_result]";
+const CODEX_TOOL_PAYLOAD_LOG_PREFIX = "[codex_tool_payload]";
+
 /**
  * Build a human-friendly rate-limit message from a FallbackSummaryError.
  * Includes a countdown when the soonest cooldown expiry is known.
@@ -452,6 +457,33 @@ export async function runAgentTurnWithFallback(params: {
                   if (evt.stream === "tool") {
                     const phase = typeof evt.data.phase === "string" ? evt.data.phase : "";
                     const name = typeof evt.data.name === "string" ? evt.data.name : undefined;
+                    const toolCallId =
+                      typeof evt.data.toolCallId === "string" ? evt.data.toolCallId : undefined;
+                    if (phase === "start") {
+                      logVerbose(
+                        `${CODEX_TOOL_START_LOG_PREFIX} ${JSON.stringify({
+                          name,
+                          toolCallId,
+                          data: evt.data,
+                        })}`,
+                      );
+                    } else if (phase === "update") {
+                      logVerbose(
+                        `${CODEX_TOOL_UPDATE_LOG_PREFIX} ${JSON.stringify({
+                          name,
+                          toolCallId,
+                          data: evt.data,
+                        })}`,
+                      );
+                    } else if (phase === "result") {
+                      logVerbose(
+                        `${CODEX_TOOL_RESULT_LOG_PREFIX} ${JSON.stringify({
+                          name,
+                          toolCallId,
+                          data: evt.data,
+                        })}`,
+                      );
+                    }
                     if (phase === "start" || phase === "update") {
                       await params.typingSignals.signalToolStart();
                       await params.opts?.onToolStart?.({ name, phase });
@@ -527,6 +559,12 @@ export async function runAgentTurnWithFallback(params: {
                             if (text !== undefined) {
                               await params.typingSignals.signalTextDelta(text);
                             }
+                            logVerbose(
+                              `${CODEX_TOOL_PAYLOAD_LOG_PREFIX} ${JSON.stringify({
+                                ...payload,
+                                text,
+                              })}`,
+                            );
                             await onToolResult({
                               ...payload,
                               text,

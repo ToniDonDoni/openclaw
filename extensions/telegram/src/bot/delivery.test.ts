@@ -48,6 +48,8 @@ vi.mock("../../../../src/hooks/internal-hooks.js", async () => {
 
 vi.resetModules();
 const { deliverReplies } = await import("./delivery.js");
+const { rememberRecentMessageToolMedia, resetRecentMessageToolMediaForTests } =
+  await import("../recent-tool-media-dedupe.js");
 
 vi.mock("grammy", () => ({
   API_CONSTANTS: {
@@ -130,7 +132,8 @@ function createVoiceFailureHarness(params: {
 
 describe("deliverReplies", () => {
   beforeEach(() => {
-    loadWebMedia.mockClear();
+    resetRecentMessageToolMediaForTests();
+    loadWebMedia.mockReset();
     triggerInternalHook.mockReset();
     messageHookRunner.hasHooks.mockReset();
     messageHookRunner.hasHooks.mockReturnValue(false);
@@ -350,6 +353,52 @@ describe("deliverReplies", () => {
         }),
       }),
       expect.objectContaining({ channelId: "telegram", conversationId: "123" }),
+    );
+  });
+
+  it("suppresses reply media that was just sent via message.send in the same chat", async () => {
+    const runtime = createRuntime(false);
+    const sendDocument = vi.fn().mockResolvedValue({ message_id: 7, chat: { id: "123" } });
+    const bot = createBot({ sendDocument });
+
+    mockMediaLoad("photo.svg", "image/svg+xml", "svg");
+    rememberRecentMessageToolMedia({
+      chatId: "123",
+      mediaUrl: "/tmp/workspace/photo.svg",
+    });
+
+    await deliverWith({
+      replies: [{ mediaUrl: "/tmp/workspace/photo.svg" }],
+      runtime,
+      bot,
+    });
+
+    expect(sendDocument).not.toHaveBeenCalled();
+  });
+
+  it("sends remaining text when duplicate reply media is suppressed", async () => {
+    const runtime = createRuntime(false);
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 9, chat: { id: "123" } });
+    const sendPhoto = vi.fn().mockResolvedValue({ message_id: 8, chat: { id: "123" } });
+    const bot = createBot({ sendMessage, sendPhoto });
+
+    mockMediaLoad("photo.jpg", "image/jpeg", "image");
+    rememberRecentMessageToolMedia({
+      chatId: "123",
+      mediaUrl: "/tmp/workspace/photo.jpg",
+    });
+
+    await deliverWith({
+      replies: [{ text: "fallback text", mediaUrl: "/tmp/workspace/photo.jpg" }],
+      runtime,
+      bot,
+    });
+
+    expect(sendPhoto).not.toHaveBeenCalled();
+    expect(sendMessage).toHaveBeenCalledWith(
+      "123",
+      expect.stringContaining("fallback text"),
+      expect.any(Object),
     );
   });
 

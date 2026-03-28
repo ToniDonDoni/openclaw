@@ -15,7 +15,12 @@
 
 import { EventEmitter } from "node:events";
 import WebSocket, { type ClientOptions } from "ws";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveProviderAttributionHeaders } from "./provider-attribution.js";
+
+const apiLog = createSubsystemLogger("agent/openai-api");
+const MODEL_API_WS_RAW_TEXT_LOG_PREFIX = "[model_api_ws_raw_text]";
+const MODEL_API_WS_PARSED_EVENT_LOG_PREFIX = "[model_api_ws_parsed_event]";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // WebSocket Event Types (Server → Client)
@@ -509,6 +514,8 @@ export class OpenAIWebSocketManager extends EventEmitter<InternalEvents> {
       text = String(data);
     }
 
+    apiLog.info(`${MODEL_API_WS_RAW_TEXT_LOG_PREFIX} ${text}`);
+
     let parsed: unknown;
     try {
       parsed = JSON.parse(text);
@@ -527,6 +534,8 @@ export class OpenAIWebSocketManager extends EventEmitter<InternalEvents> {
       );
       return;
     }
+
+    apiLog.info(`${MODEL_API_WS_PARSED_EVENT_LOG_PREFIX} ${JSON.stringify(parsed)}`);
 
     const event = parsed as OpenAIWebSocketEvent;
 

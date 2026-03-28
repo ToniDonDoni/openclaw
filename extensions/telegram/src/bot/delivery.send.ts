@@ -11,6 +11,11 @@ const EMPTY_TEXT_ERR_RE = /message text is empty/i;
 const THREAD_NOT_FOUND_RE = /message thread not found/i;
 const GrammyErrorCtor: typeof GrammyError | undefined =
   typeof GrammyError === "function" ? GrammyError : undefined;
+const TELEGRAM_OUTBOUND_LOG_PREFIX = "[tg_reply_text]";
+
+function logTelegramOutbound(runtime: RuntimeEnv, message: string): void {
+  runtime.log?.(`${TELEGRAM_OUTBOUND_LOG_PREFIX} ${message}`);
+}
 
 function isTelegramThreadNotFoundError(err: unknown): boolean {
   if (GrammyErrorCtor && err instanceof GrammyErrorCtor) {
@@ -136,7 +141,10 @@ export async function sendTelegramText(
           ...effectiveParams,
         }),
     });
-    runtime.log?.(`telegram sendMessage ok chat=${chatId} message=${res.message_id} (plain)`);
+    logTelegramOutbound(
+      runtime,
+      `sendMessage ok chat=${chatId} message=${res.message_id} mode=plain`,
+    );
     return res.message_id;
   };
 
@@ -165,7 +173,10 @@ export async function sendTelegramText(
           ...effectiveParams,
         }),
     });
-    runtime.log?.(`telegram sendMessage ok chat=${chatId} message=${res.message_id}`);
+    logTelegramOutbound(
+      runtime,
+      `sendMessage ok chat=${chatId} message=${res.message_id} mode=html`,
+    );
     return res.message_id;
   } catch (err) {
     const errText = formatErrorMessage(err);
@@ -173,7 +184,7 @@ export async function sendTelegramText(
       if (!hasFallbackText) {
         throw err;
       }
-      runtime.log?.(`telegram formatted send failed; retrying without formatting: ${errText}`);
+      logTelegramOutbound(runtime, `sendMessage format-fallback chat=${chatId} error=${errText}`);
       return await sendPlainFallback();
     }
     throw err;

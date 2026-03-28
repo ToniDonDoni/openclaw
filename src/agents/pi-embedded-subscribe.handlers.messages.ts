@@ -1,7 +1,9 @@
 import type { AgentEvent, AgentMessage } from "@mariozechner/pi-agent-core";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { parseReplyDirectives } from "../auto-reply/reply/reply-directives.js";
+import { filterMessagingToolMediaDuplicates } from "../auto-reply/reply/reply-payloads-dedupe.js";
 import { SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import { logVerbose } from "../globals.js";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import { createInlineCodeState } from "../markdown/code-spans.js";
 import {
@@ -22,6 +24,21 @@ import {
   formatReasoningMessage,
   promoteThinkingTagsToBlocks,
 } from "./pi-embedded-utils.js";
+
+const BLOCK_REPLY_TRACE_LOG_PREFIX = "[block_reply_trace]";
+const DEBUG_BUILD_MARKER_LOG_PREFIX = "[debug_build_marker]";
+const DEBUG_BUILD_MARKER_VERSION = "draft-trace-2026-03-27-v1";
+let didLogDebugBuildMarker = false;
+
+function logDebugBuildMarker(): void {
+  if (didLogDebugBuildMarker) {
+    return;
+  }
+  didLogDebugBuildMarker = true;
+  logVerbose(
+    `${DEBUG_BUILD_MARKER_LOG_PREFIX} ${DEBUG_BUILD_MARKER_VERSION} source=pi-embedded-subscribe.handlers.messages`,
+  );
+}
 
 const stripTrailingDirective = (text: string): string => {
   const openIndex = text.lastIndexOf("[[");
@@ -138,6 +155,65 @@ export function buildAssistantStreamData(params: {
   };
 }
 
+export function filterBlockReplyMediaDuplicates(params: {
+  text?: string;
+  mediaUrls?: string[];
+  audioAsVoice?: boolean;
+  replyToId?: string;
+  replyToTag?: boolean;
+  replyToCurrent?: boolean;
+  sentMediaUrls: string[];
+}): {
+  text?: string;
+  mediaUrls?: string[];
+  audioAsVoice?: boolean;
+  replyToId?: string;
+  replyToTag?: boolean;
+  replyToCurrent?: boolean;
+} {
+  if (!params.mediaUrls?.length || params.sentMediaUrls.length === 0) {
+    return {
+      text: params.text,
+      mediaUrls: params.mediaUrls,
+      audioAsVoice: params.audioAsVoice,
+      replyToId: params.replyToId,
+      replyToTag: params.replyToTag,
+      replyToCurrent: params.replyToCurrent,
+    };
+  }
+
+  const [filteredPayload] = filterMessagingToolMediaDuplicates({
+    payloads: [{ text: params.text, mediaUrls: params.mediaUrls }],
+    sentMediaUrls: params.sentMediaUrls,
+  });
+  const outputMediaUrls = filteredPayload?.mediaUrls?.length
+    ? filteredPayload.mediaUrls
+    : undefined;
+  const removedMediaUrls = (params.mediaUrls ?? []).filter(
+    (url) => !new Set(outputMediaUrls ?? []).has(url),
+  );
+  if (removedMediaUrls.length > 0) {
+    logVerbose(
+      `${BLOCK_REPLY_TRACE_LOG_PREFIX} ${JSON.stringify({
+        phase: "filterBlockReplyMediaDuplicates:removed",
+        inputMediaUrls: params.mediaUrls,
+        sentMediaUrls: params.sentMediaUrls,
+        removedMediaUrls,
+        outputMediaUrls,
+      })}`,
+    );
+  }
+
+  return {
+    text: params.text,
+    mediaUrls: outputMediaUrls,
+    audioAsVoice: params.audioAsVoice,
+    replyToId: params.replyToId,
+    replyToTag: params.replyToTag,
+    replyToCurrent: params.replyToCurrent,
+  };
+}
+
 export function handleMessageStart(
   ctx: EmbeddedPiSubscribeContext,
   evt: AgentEvent & { message: AgentMessage },
@@ -161,6 +237,7 @@ export function handleMessageUpdate(
   ctx: EmbeddedPiSubscribeContext,
   evt: AgentEvent & { message: AgentMessage; assistantMessageEvent?: unknown },
 ) {
+  logDebugBuildMarker();
   const msg = evt.message;
   if (msg?.role !== "assistant" || isTranscriptOnlyOpenClawAssistantMessage(msg)) {
     return;
@@ -331,6 +408,7 @@ export function handleMessageEnd(
   ctx: EmbeddedPiSubscribeContext,
   evt: AgentEvent & { message: AgentMessage },
 ) {
+  logDebugBuildMarker();
   const msg = evt.message;
   if (msg?.role !== "assistant" || isTranscriptOnlyOpenClawAssistantMessage(msg)) {
     return;
@@ -446,15 +524,56 @@ export function handleMessageEnd(
       replyToTag,
       replyToCurrent,
     } = splitResult;
-    // Emit if there's content OR audioAsVoice flag (to propagate the flag).
-    if (hasAssistantVisibleReply({ text: cleanedText, mediaUrls, audioAsVoice })) {
-      ctx.emitBlockReply({
-        text: cleanedText,
-        mediaUrls: mediaUrls?.length ? mediaUrls : undefined,
+    logVerbose(
+      `${BLOCK_REPLY_TRACE_LOG_PREFIX} ${JSON.stringify({
+        phase: "emitSplitResultAsBlockReply:input",
+        cleanedText,
+        mediaUrls,
         audioAsVoice,
         replyToId,
         replyToTag,
         replyToCurrent,
+        messagingToolSentMediaUrls: ctx.state.messagingToolSentMediaUrls,
+        messagingToolSentTexts: ctx.state.messagingToolSentTexts,
+      })}`,
+    );
+    const dedupedReply = filterBlockReplyMediaDuplicates({
+      text: cleanedText,
+      mediaUrls,
+      audioAsVoice,
+      replyToId,
+      replyToTag,
+      replyToCurrent,
+      sentMediaUrls: ctx.state.messagingToolSentMediaUrls,
+    });
+    logVerbose(
+      `${BLOCK_REPLY_TRACE_LOG_PREFIX} ${JSON.stringify({
+        phase: "emitSplitResultAsBlockReply:deduped",
+        dedupedReply,
+      })}`,
+    );
+    // Emit if there's content OR audioAsVoice flag (to propagate the flag).
+    if (hasAssistantVisibleReply(dedupedReply)) {
+      logVerbose(
+        `${BLOCK_REPLY_TRACE_LOG_PREFIX} ${JSON.stringify({
+          phase: "emitSplitResultAsBlockReply:emit",
+          payload: {
+            text: dedupedReply.text,
+            mediaUrls: dedupedReply.mediaUrls?.length ? dedupedReply.mediaUrls : undefined,
+            audioAsVoice: dedupedReply.audioAsVoice,
+            replyToId: dedupedReply.replyToId,
+            replyToTag: dedupedReply.replyToTag,
+            replyToCurrent: dedupedReply.replyToCurrent,
+          },
+        })}`,
+      );
+      ctx.emitBlockReply({
+        text: dedupedReply.text,
+        mediaUrls: dedupedReply.mediaUrls?.length ? dedupedReply.mediaUrls : undefined,
+        audioAsVoice: dedupedReply.audioAsVoice,
+        replyToId: dedupedReply.replyToId,
+        replyToTag: dedupedReply.replyToTag,
+        replyToCurrent: dedupedReply.replyToCurrent,
       });
     }
   };

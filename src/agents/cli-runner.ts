@@ -55,6 +55,16 @@ import { redactRunIdentifier, resolveRunWorkspaceDir } from "./workspace-run.js"
 const log = createSubsystemLogger("agent/cli-backend");
 const CLI_BACKEND_LOG_OUTPUT_ENV = "OPENCLAW_CLI_BACKEND_LOG_OUTPUT";
 const LEGACY_CLAUDE_CLI_LOG_OUTPUT_ENV = "OPENCLAW_CLAUDE_CLI_LOG_OUTPUT";
+const CODEX_CLI_VERY_RAW_STDOUT_LOG_PREFIX = "[codex_cli_very_raw_stdout]";
+const CODEX_CLI_VERY_RAW_STDERR_LOG_PREFIX = "[codex_cli_very_raw_stderr]";
+const CODEX_CLI_RAW_STDOUT_LOG_PREFIX = "[codex_cli_raw_stdout]";
+const CODEX_CLI_RAW_STDERR_LOG_PREFIX = "[codex_cli_raw_stderr]";
+const CODEX_CLI_PARSED_LOG_PREFIX = "[codex_cli_parsed]";
+const CODEX_CLI_PAYLOADS_LOG_PREFIX = "[codex_cli_payloads]";
+
+function formatCodexMultilineLog(prefix: string, value: string): string {
+  return value ? `${prefix}\n${value}\n[/${prefix.slice(1)}` : `${prefix} <empty>`;
+}
 
 export async function runCliAgent(params: {
   sessionId: string;
@@ -361,8 +371,12 @@ export async function runCliAgent(params: {
         });
         const result = await managedRun.wait();
 
+        log.info(formatCodexMultilineLog(CODEX_CLI_VERY_RAW_STDOUT_LOG_PREFIX, result.stdout));
+        log.info(formatCodexMultilineLog(CODEX_CLI_VERY_RAW_STDERR_LOG_PREFIX, result.stderr));
         const stdout = result.stdout.trim();
         const stderr = result.stderr.trim();
+        log.info(formatCodexMultilineLog(CODEX_CLI_RAW_STDOUT_LOG_PREFIX, stdout));
+        log.info(formatCodexMultilineLog(CODEX_CLI_RAW_STDERR_LOG_PREFIX, stderr));
         if (logOutputText) {
           if (stdout) {
             log.info(`cli stdout:\n${stdout}`);
@@ -425,17 +439,24 @@ export async function runCliAgent(params: {
         }
 
         const outputMode = useResume ? (backend.resumeOutput ?? backend.output) : backend.output;
+        log.info(`${CODEX_CLI_RAW_STDOUT_LOG_PREFIX} ${JSON.stringify(stdout)}`);
 
         if (outputMode === "text") {
-          return { text: stdout, sessionId: undefined };
+          const parsed = { text: stdout, sessionId: undefined };
+          log.info(`${CODEX_CLI_PARSED_LOG_PREFIX} ${JSON.stringify(parsed)}`);
+          return parsed;
         }
         if (outputMode === "jsonl") {
           const parsed = parseCliJsonl(stdout, backend);
-          return parsed ?? { text: stdout };
+          const resolved = parsed ?? { text: stdout };
+          log.info(`${CODEX_CLI_PARSED_LOG_PREFIX} ${JSON.stringify(resolved)}`);
+          return resolved;
         }
 
         const parsed = parseCliJson(stdout, backend);
-        return parsed ?? { text: stdout };
+        const resolved = parsed ?? { text: stdout };
+        log.info(`${CODEX_CLI_PARSED_LOG_PREFIX} ${JSON.stringify(resolved)}`);
+        return resolved;
       });
 
       return output;
@@ -452,6 +473,7 @@ export async function runCliAgent(params: {
   }): EmbeddedPiRunResult => {
     const text = resultParams.output.text?.trim();
     const payloads = text ? [{ text }] : undefined;
+    log.info(`${CODEX_CLI_PAYLOADS_LOG_PREFIX} ${JSON.stringify(payloads ?? [])}`);
 
     return {
       payloads,
