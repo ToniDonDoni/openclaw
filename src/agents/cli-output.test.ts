@@ -145,6 +145,50 @@ describe("parseCliJsonl", () => {
     });
   });
 
+  it("parses final Codex agent_message items while still ignoring non-final message noise", () => {
+    const result = parseCliJsonl(
+      [
+        JSON.stringify({ type: "thread.started", thread_id: "thread-654" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "User prompt" }],
+          },
+        }),
+        JSON.stringify({
+          type: "item.delta",
+          item: {
+            type: "message_delta",
+            role: "assistant",
+            content: [{ type: "output_text", text: "Partial answer" }],
+          },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: {
+            id: "item_0",
+            type: "agent_message",
+            text: "Final answer",
+          },
+        }),
+      ].join("\n"),
+      {
+        command: "codex",
+        output: "jsonl",
+        sessionIdFields: ["thread_id"],
+      },
+      "codex-cli",
+    );
+
+    expect(result).toEqual({
+      text: "Final answer",
+      sessionId: "thread-654",
+      usage: undefined,
+    });
+  });
+
   it("preserves Codex thread metadata without leaking raw JSONL when no message text exists", () => {
     const raw = [
       JSON.stringify({ type: "thread.started", thread_id: "thread-789" }),
