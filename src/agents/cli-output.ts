@@ -59,12 +59,23 @@ function collectCliText(value: unknown): string {
   return "";
 }
 
-function collectCliJsonlItemText(item: Record<string, unknown>): string {
-  const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
-  if (type && !type.includes("message")) {
+function collectCliJsonlItemText(params: {
+  parsed: Record<string, unknown>;
+  item: Record<string, unknown>;
+}): string {
+  const eventType = typeof params.parsed.type === "string" ? params.parsed.type.toLowerCase() : "";
+  if (eventType && eventType !== "item.completed") {
     return "";
   }
-  return collectCliText(item).trim();
+  const itemType = typeof params.item.type === "string" ? params.item.type.toLowerCase() : "";
+  if (itemType && itemType !== "message") {
+    return "";
+  }
+  const role = typeof params.item.role === "string" ? params.item.role.toLowerCase() : "";
+  if (role && role !== "assistant") {
+    return "";
+  }
+  return collectCliText(params.item).trim();
 }
 
 function pickCliSessionId(
@@ -182,7 +193,7 @@ export function parseCliJsonl(
 
     const item = isRecord(parsed.item) ? parsed.item : null;
     if (item) {
-      const itemText = collectCliJsonlItemText(item);
+      const itemText = collectCliJsonlItemText({ parsed, item });
       if (itemText) {
         texts.push(itemText);
       }
