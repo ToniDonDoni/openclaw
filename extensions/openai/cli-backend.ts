@@ -44,5 +44,15 @@ export function buildOpenAICodexCliBackend(): CliBackendPlugin {
       },
       serialize: true,
     },
+    normalizeConfig: (config) => ({
+      ...config,
+      // Codex `exec --json` emits a JSONL event stream, not a single JSON object.
+      // Force the parser mode here so a user config override cannot regress thread
+      // persistence or leak raw event-stream chunks to chat surfaces.
+      output: "jsonl",
+      // `codex exec resume` currently returns plain text, not JSON.
+      resumeOutput: "text",
+      sessionIdFields: ["thread_id"],
+    }),
   };
 }

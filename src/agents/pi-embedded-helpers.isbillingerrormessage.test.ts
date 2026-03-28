@@ -883,6 +883,13 @@ describe("classifyFailoverReason", () => {
     expect(classifyFailoverReason("529 API is busy")).toBe("overloaded");
     expect(classifyFailoverReason("529 Please try again")).toBe("overloaded");
   });
+  it("classifies Codex missing-rollout resume failures as session_expired", () => {
+    expect(
+      classifyFailoverReason(
+        "Error: thread/resume: thread/resume failed: no rollout found for thread id 57476a23-92f2-4482-81b4-e3115220928c",
+      ),
+    ).toBe("session_expired");
+  });
   it("classifies zhipuai Weekly/Monthly Limit Exhausted as rate_limit (#33785)", () => {
     expect(
       classifyFailoverReason(

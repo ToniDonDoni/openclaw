@@ -59,6 +59,14 @@ function collectCliText(value: unknown): string {
   return "";
 }
 
+function collectCliJsonlItemText(item: Record<string, unknown>): string {
+  const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
+  if (type && !type.includes("message")) {
+    return "";
+  }
+  return collectCliText(item).trim();
+}
+
 function pickCliSessionId(
   parsed: Record<string, unknown>,
   backend: CliBackendConfig,
@@ -173,15 +181,18 @@ export function parseCliJsonl(
     }
 
     const item = isRecord(parsed.item) ? parsed.item : null;
-    if (item && typeof item.text === "string") {
-      const type = typeof item.type === "string" ? item.type.toLowerCase() : "";
-      if (!type || type.includes("message")) {
-        texts.push(item.text);
+    if (item) {
+      const itemText = collectCliJsonlItemText(item);
+      if (itemText) {
+        texts.push(itemText);
       }
     }
   }
   const text = texts.join("\n").trim();
   if (!text) {
+    if (sessionId || usage) {
+      return { text: "", sessionId, usage };
+    }
     return null;
   }
   return { text, sessionId, usage };

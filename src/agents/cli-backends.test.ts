@@ -101,6 +101,12 @@ beforeEach(() => {
           },
         },
       },
+      normalizeConfig: (config) => ({
+        ...config,
+        output: "jsonl",
+        resumeOutput: "text",
+        sessionIdFields: ["thread_id"],
+      }),
     }),
     createBackendEntry({
       pluginId: "google",
@@ -125,6 +131,9 @@ describe("resolveCliBackendConfig reliability merge", () => {
     const resolved = resolveCliBackendConfig("codex-cli");
 
     expect(resolved).not.toBeNull();
+    expect(resolved?.config.output).toBe("jsonl");
+    expect(resolved?.config.resumeOutput).toBe("text");
+    expect(resolved?.config.sessionIdFields).toEqual(["thread_id"]);
     expect(resolved?.config.args).toEqual([
       "exec",
       "--json",
@@ -175,6 +184,30 @@ describe("resolveCliBackendConfig reliability merge", () => {
     expect(resolved?.config.reliability?.watchdog?.resume?.minMs).toBe(60_000);
     expect(resolved?.config.reliability?.watchdog?.resume?.maxMs).toBe(180_000);
     expect(resolved?.config.reliability?.watchdog?.fresh?.noOutputTimeoutRatio).toBe(0.8);
+  });
+
+  it("overrides broken configured codex output parsing back to jsonl/text", () => {
+    const cfg = {
+      agents: {
+        defaults: {
+          cliBackends: {
+            "codex-cli": {
+              command: "codex",
+              output: "json",
+              resumeOutput: "json",
+              sessionIdFields: ["session_id"],
+            },
+          },
+        },
+      },
+    } satisfies OpenClawConfig;
+
+    const resolved = resolveCliBackendConfig("codex-cli", cfg);
+
+    expect(resolved).not.toBeNull();
+    expect(resolved?.config.output).toBe("jsonl");
+    expect(resolved?.config.resumeOutput).toBe("text");
+    expect(resolved?.config.sessionIdFields).toEqual(["thread_id"]);
   });
 });
 
