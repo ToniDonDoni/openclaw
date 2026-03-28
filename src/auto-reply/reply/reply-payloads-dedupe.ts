@@ -21,10 +21,6 @@ export function filterMessagingToolMediaDuplicates(params: {
   payloads: ReplyPayload[];
   sentMediaUrls: string[];
 }): ReplyPayload[] {
-  // TEMP: disable messaging-tool media dedupe to prove the regression tests fail
-  // when duplicate screenshots are allowed through the final reply path.
-  return params.payloads;
-
   const normalizeMediaForDedupe = (value: string): string => {
     const trimmed = value.trim();
     if (!trimmed) {
