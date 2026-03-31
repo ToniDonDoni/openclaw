@@ -36,6 +36,7 @@ import {
 } from "./network-errors.js";
 import { normalizeTelegramReplyToMessageId } from "./outbound-params.js";
 import { makeProxyFetch } from "./proxy.js";
+import { rememberRecentMessageToolMedia } from "./recent-tool-media-dedupe.js";
 import { recordSentMessage } from "./sent-message-cache.js";
 import { maybePersistResolvedTelegramTarget } from "./target-writeback.js";
 import {
@@ -183,6 +184,7 @@ const MESSAGE_NOT_MODIFIED_RE =
 const CHAT_NOT_FOUND_RE = /400: Bad Request: chat not found/i;
 const sendLogger = createSubsystemLogger("telegram/send");
 const diagLogger = createSubsystemLogger("telegram/diagnostic");
+const TELEGRAM_OUTBOUND_LOG_PREFIX = "[tg_msgsend]";
 const telegramClientOptionsCache = new Map<string, ApiClientOptions | undefined>();
 const MAX_TELEGRAM_CLIENT_OPTIONS_CACHE_SIZE = 64;
 
@@ -194,6 +196,10 @@ function asTelegramClientFetch(
 
 export function resetTelegramClientOptionsCacheForTests(): void {
   telegramClientOptionsCache.clear();
+}
+
+function logTelegramOutbound(message: string): void {
+  sendLogger.info(`${TELEGRAM_OUTBOUND_LOG_PREFIX} ${message}`);
 }
 
 function createTelegramHttpLogger(cfg: ReturnType<typeof loadConfig>) {
@@ -764,6 +770,9 @@ export async function sendMessageTelegram(
       const res = await sendTelegramTextChunk(chunk, buildTextParams(index === chunks.length - 1));
       const messageId = resolveTelegramMessageIdOrThrow(res, context);
       recordSentMessage(chatId, messageId);
+      logTelegramOutbound(
+        `message.send text chat=${chatId} message=${messageId} context=${context}`,
+      );
       lastMessageId = String(messageId);
       lastChatId = String(res?.chat?.id ?? chatId);
     }
@@ -990,6 +999,13 @@ export async function sendMessageTelegram(
     const mediaMessageId = resolveTelegramMessageIdOrThrow(result, "media send");
     const resolvedChatId = String(result?.chat?.id ?? chatId);
     recordSentMessage(chatId, mediaMessageId);
+    rememberRecentMessageToolMedia({
+      chatId: resolvedChatId,
+      mediaUrl,
+    });
+    logTelegramOutbound(
+      `message.send ${mediaSender.label} chat=${resolvedChatId} message=${mediaMessageId} media=${mediaUrl}`,
+    );
     recordChannelActivity({
       channel: "telegram",
       accountId: account.accountId,

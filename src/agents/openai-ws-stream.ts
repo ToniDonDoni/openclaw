@@ -78,6 +78,10 @@ const defaultOpenAIWsStreamDeps: OpenAIWsStreamDeps = {
 
 let openAIWsStreamDeps: OpenAIWsStreamDeps = defaultOpenAIWsStreamDeps;
 
+const MODEL_API_WS_COMPLETED_RESPONSE_LOG_PREFIX = "[model_api_ws_completed_response]";
+const MODEL_API_WS_PARSED_MESSAGE_LOG_PREFIX = "[model_api_ws_parsed_message]";
+const MODEL_API_HTTP_EVENT_LOG_PREFIX = "[model_api_http_event]";
+
 type AssistantMessageEventStreamLike = {
   push(event: AssistantMessageEvent): void;
   end(result?: AssistantMessage): void;
@@ -569,12 +573,16 @@ export function createOpenAIWebSocketStreamFn(
             cleanup();
             // Update session state
             session.lastContextLength = capturedContextLength;
+            log.info(
+              `${MODEL_API_WS_COMPLETED_RESPONSE_LOG_PREFIX} ${JSON.stringify(event.response)}`,
+            );
             // Build and emit the assistant message
             const assistantMsg = buildAssistantMessageFromResponse(event.response, {
               api: model.api,
               provider: model.provider,
               id: model.id,
             });
+            log.info(`${MODEL_API_WS_PARSED_MESSAGE_LOG_PREFIX} ${JSON.stringify(assistantMsg)}`);
             const reason: Extract<StopReason, "stop" | "length" | "toolUse"> =
               assistantMsg.stopReason === "toolUse" ? "toolUse" : "stop";
             eventStream.push({ type: "done", reason, message: assistantMsg });
@@ -643,6 +651,7 @@ async function fallbackToHttp(
   };
   const httpStream = openAIWsStreamDeps.streamSimple(model, context, mergedOptions);
   for await (const event of httpStream) {
+    log.info(`${MODEL_API_HTTP_EVENT_LOG_PREFIX} ${JSON.stringify(event)}`);
     eventStream.push(event);
   }
 }
