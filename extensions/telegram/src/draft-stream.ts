@@ -1,5 +1,7 @@
 import type { Bot } from "grammy";
 import { createFinalizableDraftLifecycle } from "openclaw/plugin-sdk/channel-lifecycle";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
+import { resolveGlobalSingleton } from "openclaw/plugin-sdk/text-runtime";
 import { buildTelegramThreadParams, type TelegramThreadSpec } from "./bot/helpers.js";
 import { isSafeToRetrySendError, isTelegramClientRejection } from "./network-errors.js";
 import { normalizeTelegramReplyToMessageId } from "./outbound-params.js";
@@ -11,6 +13,9 @@ const THREAD_NOT_FOUND_RE = /400:\s*Bad Request:\s*message thread not found/i;
 const DRAFT_METHOD_UNAVAILABLE_RE =
   /(unknown method|method .*not (found|available|supported)|unsupported)/i;
 const DRAFT_CHAT_UNSUPPORTED_RE = /(can't be used|can be used only)/i;
+const draftLogger = createSubsystemLogger("telegram/draft");
+const TELEGRAM_DRAFT_SEND_LOG_PREFIX = "[tg_draft_send]";
+const TELEGRAM_DRAFT_EDIT_LOG_PREFIX = "[tg_draft_edit]";
 
 type TelegramSendMessageDraft = (
   chatId: Parameters<Bot["api"]["sendMessage"]>[0],
@@ -227,6 +232,9 @@ export function createTelegramDraftStream(params: {
       } else {
         await params.api.editMessageText(chatId, streamMessageId, renderedText);
       }
+      draftLogger.info(
+        `${TELEGRAM_DRAFT_EDIT_LOG_PREFIX} chat=${chatId} message=${streamMessageId}`,
+      );
       return true;
     }
     messageSendAttempted = true;
@@ -263,6 +271,9 @@ export function createTelegramDraftStream(params: {
       return true;
     }
     streamMessageId = normalizedMessageId;
+    draftLogger.info(
+      `${TELEGRAM_DRAFT_SEND_LOG_PREFIX} chat=${chatId} message=${normalizedMessageId}`,
+    );
     return true;
   };
   const sendDraftTransportPreview = async ({

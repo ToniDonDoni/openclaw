@@ -23,13 +23,19 @@ async function emitMessageToolLifecycle(params: {
   emit: (evt: unknown) => void;
   toolCallId: string;
   message: string;
+  media?: string;
   result: unknown;
 }) {
   params.emit({
     type: "tool_execution_start",
     toolName: "message",
     toolCallId: params.toolCallId,
-    args: { action: "send", to: "+1555", message: params.message },
+    args: {
+      action: "send",
+      to: "+1555",
+      message: params.message,
+      ...(params.media ? { media: params.media } : {}),
+    },
   });
   // Wait for async handler to complete.
   await Promise.resolve();
@@ -91,6 +97,23 @@ describe("subscribeEmbeddedPiSession", () => {
     await Promise.resolve();
 
     expect(onBlockReply).toHaveBeenCalledTimes(1);
+  });
+
+  it("suppresses message_end block media replies when the message tool already sent the same media", async () => {
+    const { emit, onBlockReply } = createBlockReplyHarness("message_end");
+
+    const mediaUrl = "file:///tmp/photo.jpg";
+    await emitMessageToolLifecycle({
+      emit,
+      toolCallId: "tool-message-media-1",
+      message: "",
+      media: mediaUrl,
+      result: "ok",
+    });
+    emitAssistantMessageEnd(emit, `MEDIA:${mediaUrl}`);
+    await Promise.resolve();
+
+    expect(onBlockReply).not.toHaveBeenCalled();
   });
 
   it("ignores delivery-mirror assistant messages", async () => {

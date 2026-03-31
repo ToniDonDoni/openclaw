@@ -160,6 +160,9 @@ export const dispatchTelegramMessage = async ({
   telegramDeps = defaultTelegramBotDeps,
   opts,
 }: DispatchTelegramMessageParams) => {
+  runtime.error?.(
+    `[telegram][ingress_trace] dispatchTelegramMessage:start chatId=${context.chatId} sessionKey=${context.ctxPayload.SessionKey ?? "none"}`,
+  );
   const {
     ctxPayload,
     msg,
@@ -801,6 +804,9 @@ export const dispatchTelegramMessage = async ({
     dispatchError = err;
     runtime.error?.(danger(`telegram dispatch failed: ${String(err)}`));
   } finally {
+    runtime.error?.(
+      `[telegram][ingress_trace] dispatchTelegramMessage:finally chatId=${context.chatId} queuedFinal=${queuedFinal} hadErrorReplyFailureOrSkip=${hadErrorReplyFailureOrSkip} dispatchError=${dispatchError ? String(dispatchError) : "none"}`,
+    );
     // Upstream assistant callbacks are fire-and-forget; drain queued lane work
     // before stream cleanup so boundary rotations/materialization complete first.
     await draftLaneEventQueue;

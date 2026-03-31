@@ -46,6 +46,22 @@ describe("buildReplyPayloads media filter integration", () => {
     expect(replyPayloads[0].mediaUrl).toBe("file:///tmp/photo.jpg");
   });
 
+  it("keeps only the unsent screenshot in media galleries", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [
+        {
+          text: "screenshots",
+          mediaUrls: ["file:///tmp/screenshot-1.png", "file:///tmp/screenshot-2.png"],
+        },
+      ],
+      messagingToolSentMediaUrls: ["file:///tmp/screenshot-1.png"],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.mediaUrls).toEqual(["file:///tmp/screenshot-2.png"]);
+  });
+
   it("normalizes sent media URLs before deduping normalized reply media", async () => {
     const normalizeMediaPaths = async (payload: { mediaUrl?: string; mediaUrls?: string[] }) => {
       const normalizeMedia = (value?: string) =>

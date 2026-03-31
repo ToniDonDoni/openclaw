@@ -3,6 +3,7 @@ import {
   buildAssistantStreamData,
   consumePendingToolMediaIntoReply,
   consumePendingToolMediaReply,
+  filterBlockReplyMediaDuplicates,
   hasAssistantVisibleReply,
   resolveSilentReplyFallbackText,
 } from "./pi-embedded-subscribe.handlers.messages.js";
@@ -60,6 +61,59 @@ describe("buildAssistantStreamData", () => {
       text: "hello",
       delta: "he",
       mediaUrls: ["https://example.com/a.png"],
+    });
+  });
+});
+
+describe("filterBlockReplyMediaDuplicates", () => {
+  it("strips already-sent messaging tool media from block replies", () => {
+    expect(
+      filterBlockReplyMediaDuplicates({
+        text: "",
+        mediaUrls: ["file:///tmp/photo.jpg"],
+        sentMediaUrls: ["/tmp/photo.jpg"],
+      }),
+    ).toEqual({
+      text: "",
+      mediaUrls: undefined,
+      audioAsVoice: undefined,
+      replyToId: undefined,
+      replyToTag: undefined,
+      replyToCurrent: undefined,
+    });
+  });
+
+  it("preserves block reply media that was not sent via the messaging tool", () => {
+    expect(
+      filterBlockReplyMediaDuplicates({
+        text: "",
+        mediaUrls: ["file:///tmp/photo.jpg"],
+        sentMediaUrls: ["/tmp/other.jpg"],
+      }),
+    ).toEqual({
+      text: "",
+      mediaUrls: ["file:///tmp/photo.jpg"],
+      audioAsVoice: undefined,
+      replyToId: undefined,
+      replyToTag: undefined,
+      replyToCurrent: undefined,
+    });
+  });
+
+  it("keeps only unsent screenshots in block reply media arrays", () => {
+    expect(
+      filterBlockReplyMediaDuplicates({
+        text: "",
+        mediaUrls: ["file:///tmp/screenshot-1.png", "file:///tmp/screenshot-2.png"],
+        sentMediaUrls: ["file:///tmp/screenshot-1.png"],
+      }),
+    ).toEqual({
+      text: "",
+      mediaUrls: ["file:///tmp/screenshot-2.png"],
+      audioAsVoice: undefined,
+      replyToId: undefined,
+      replyToTag: undefined,
+      replyToCurrent: undefined,
     });
   });
 });

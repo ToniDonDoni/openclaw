@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "result": [
+    {
+      "update_id": 643371579,
+      "message": {
+        "message_id": 146,
+        "from": {
+          "id": 1076875102,
+          "is_bot": false,
+          "first_name": "D",
+          "username": "Dondondondoni",
+          "language_code": "en",
+          "is_premium": true
+        },
+        "chat": {
+          "id": 1076875102,
+          "first_name": "D",
+          "username": "Dondondondoni",
+          "type": "private"
+        },
+        "date": 1774582908,
+        "text": "Open https://example.com and take exactly one screenshot.\n\nThen do both actions:\n1. Use the message tool to send that screenshot to this same Telegram chat as an image.\n2. In your final assistant reply, do not return JSON and do not use markdown image syntax. Return the same screenshot using OpenClaw media directive syntax on its own line:\n\nMEDIA:/absolute/path/to/the/same/screenshot.jpg\n\nYour final reply must use MEDIA: with the exact same screenshot path.",
+        "entities": [{ "offset": 5, "length": 19, "type": "url" }],
+        "link_preview_options": { "is_disabled": true }
+      }
+    }
+  ]
+}
