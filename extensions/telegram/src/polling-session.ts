@@ -21,8 +21,6 @@ const TELEGRAM_POLL_RESTART_POLICY = {
 const POLL_STALL_THRESHOLD_MS = 90_000;
 const POLL_WATCHDOG_INTERVAL_MS = 30_000;
 const POLL_STOP_GRACE_MS = 15_000;
-const DEBUG_GETUPDATES_FILE_ENV = "OPENCLAW_TELEGRAM_DEBUG_GETUPDATES_FILE";
-const DEBUG_EMPTY_GETUPDATES_DELAY_MS = 250;
 
 const waitForGracefulStop = async (stop: () => Promise<void>) => {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -93,9 +91,7 @@ export class TelegramPollingSession {
 
   async runUntilAbort(): Promise<void> {
     while (!this.opts.abortSignal?.aborted) {
-      this.opts.log("[telegram][poll_trace] createPollingBot:start");
       const bot = await this.#createPollingBot();
-      this.opts.log(`[telegram][poll_trace] createPollingBot:${bot ? "done" : "retry"}`);
       if (!bot) {
         continue;
       }
@@ -175,14 +171,12 @@ export class TelegramPollingSession {
       return "ready";
     }
     try {
-      this.opts.log("[telegram][poll_trace] deleteWebhook:start");
       await withTelegramApiErrorLogging({
         operation: "deleteWebhook",
         runtime: this.opts.runtime,
         fn: () => bot.api.deleteWebhook({ drop_pending_updates: false }),
       });
       this.#webhookCleared = true;
-      this.opts.log("[telegram][poll_trace] deleteWebhook:done");
       return "ready";
     } catch (err) {
       const shouldRetry = await this.#waitBeforeRetryOnRecoverableSetupError(
@@ -199,12 +193,9 @@ export class TelegramPollingSession {
       return;
     }
     try {
-      this.opts.log(`[telegram][poll_trace] confirmOffset:start offset=${lastUpdateId + 1}`);
       await bot.api.getUpdates({ offset: lastUpdateId + 1, limit: 1, timeout: 0 });
-      this.opts.log("[telegram][poll_trace] confirmOffset:done");
     } catch {
       // Non-fatal: runner middleware still skips duplicates via shouldSkipUpdate.
-      this.opts.log("[telegram][poll_trace] confirmOffset:error");
     }
   }
 
@@ -218,13 +209,9 @@ export class TelegramPollingSession {
     if (typeof botWithDebug.init === "function") {
       const originalInit = botWithDebug.init.bind(botWithDebug);
       botWithDebug.init = async () => {
-        this.opts.log("[telegram][poll_trace] bot.init:start");
         try {
-          const result = await originalInit();
-          this.opts.log("[telegram][poll_trace] bot.init:done");
-          return result;
+          return await originalInit();
         } catch (error) {
-          this.opts.log(`[telegram][poll_trace] bot.init:error ${formatErrorMessage(error)}`);
           throw error;
         }
       };
@@ -236,48 +223,19 @@ export class TelegramPollingSession {
     debugApi.getUpdates = (async (
       ...args: Parameters<typeof originalGetUpdates>
     ): Promise<Awaited<ReturnType<typeof originalGetUpdates>>> => {
-      this.opts.log(
-        `[telegram][poll_trace] bot.api.getUpdates:start payload=${JSON.stringify(args[0] ?? {})}`,
-      );
       try {
-        const updates = await originalGetUpdates(...args);
-        if (
-          process.env[DEBUG_GETUPDATES_FILE_ENV]?.trim() &&
-          Array.isArray(updates) &&
-          updates.length === 0
-        ) {
-          this.opts.log(
-            `[telegram][poll_trace] bot.api.getUpdates:debug-empty-delay ms=${DEBUG_EMPTY_GETUPDATES_DELAY_MS}`,
-          );
-          await sleepWithAbort(DEBUG_EMPTY_GETUPDATES_DELAY_MS, this.opts.abortSignal);
-        }
-        this.opts.log(
-          `[telegram][poll_trace] bot.api.getUpdates:done count=${Array.isArray(updates) ? updates.length : -1}`,
-        );
-        return updates;
+        return await originalGetUpdates(...args);
       } catch (error) {
-        this.opts.log(
-          `[telegram][poll_trace] bot.api.getUpdates:error ${formatErrorMessage(error)}`,
-        );
         throw error;
       }
     }) as typeof originalGetUpdates;
     if (typeof botWithDebug.handleUpdate === "function") {
       const originalHandleUpdate = botWithDebug.handleUpdate.bind(botWithDebug);
       botWithDebug.handleUpdate = async (update) => {
-        const updateId =
-          update && typeof update === "object" && "update_id" in update
-            ? String((update as { update_id?: unknown }).update_id ?? "unknown")
-            : "unknown";
-        this.opts.log(`[telegram][poll_trace] handleUpdate:start update_id=${updateId}`);
         try {
           await originalHandleUpdate(update);
-          this.opts.log(`[telegram][poll_trace] handleUpdate:done update_id=${updateId}`);
           return;
         } catch (error) {
-          this.opts.log(
-            `[telegram][poll_trace] handleUpdate:error update_id=${updateId} ${formatErrorMessage(error)}`,
-          );
           throw error;
         }
       };
@@ -357,9 +315,7 @@ export class TelegramPollingSession {
       }
     });
 
-    this.opts.log("[telegram][poll_trace] runner:start");
     const runner = run(botWithDebug, this.opts.runnerOptions);
-    this.opts.log("[telegram][poll_trace] runner:started");
     this.#activeRunner = runner;
     const fetchAbortController = this.#activeFetchAbort;
     const abortFetch = () => {
