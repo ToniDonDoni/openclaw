@@ -65,6 +65,7 @@ export class TelegramPollingSession {
   #activeRunner: ReturnType<typeof run> | undefined;
   #activeFetchAbort: AbortController | undefined;
   #transportState: TelegramPollingTransportState;
+
   constructor(private readonly opts: TelegramPollingSessionOpts) {
     this.#transportState = new TelegramPollingTransportState({
       log: opts.log,
@@ -202,45 +203,6 @@ export class TelegramPollingSession {
   async #runPollingCycle(bot: TelegramBot): Promise<"continue" | "exit"> {
     await this.#confirmPersistedOffset(bot);
 
-    const botWithDebug = bot as TelegramBot & {
-      init?: () => Promise<unknown>;
-      handleUpdate?: (update: unknown) => Promise<void>;
-    };
-    if (typeof botWithDebug.init === "function") {
-      const originalInit = botWithDebug.init.bind(botWithDebug);
-      botWithDebug.init = async () => {
-        try {
-          return await originalInit();
-        } catch (error) {
-          throw error;
-        }
-      };
-    }
-    const debugApi = botWithDebug.api as typeof botWithDebug.api & {
-      getUpdates: typeof botWithDebug.api.getUpdates;
-    };
-    const originalGetUpdates = debugApi.getUpdates.bind(debugApi);
-    debugApi.getUpdates = (async (
-      ...args: Parameters<typeof originalGetUpdates>
-    ): Promise<Awaited<ReturnType<typeof originalGetUpdates>>> => {
-      try {
-        return await originalGetUpdates(...args);
-      } catch (error) {
-        throw error;
-      }
-    }) as typeof originalGetUpdates;
-    if (typeof botWithDebug.handleUpdate === "function") {
-      const originalHandleUpdate = botWithDebug.handleUpdate.bind(botWithDebug);
-      botWithDebug.handleUpdate = async (update) => {
-        try {
-          await originalHandleUpdate(update);
-          return;
-        } catch (error) {
-          throw error;
-        }
-      };
-    }
-
     let lastGetUpdatesAt = Date.now();
     let lastApiActivityAt = Date.now();
     let nextInFlightApiCallId = 0;
@@ -315,7 +277,7 @@ export class TelegramPollingSession {
       }
     });
 
-    const runner = run(botWithDebug, this.opts.runnerOptions);
+    const runner = run(bot, this.opts.runnerOptions);
     this.#activeRunner = runner;
     const fetchAbortController = this.#activeFetchAbort;
     const abortFetch = () => {
