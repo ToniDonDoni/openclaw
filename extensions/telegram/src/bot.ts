@@ -255,6 +255,7 @@ export function createTelegramBot(opts: TelegramBotOptions) {
       });
     };
   }
+
   const timeoutSeconds =
     typeof telegramCfg?.timeoutSeconds === "number" && Number.isFinite(telegramCfg.timeoutSeconds)
       ? Math.max(1, Math.floor(telegramCfg.timeoutSeconds))
