@@ -909,10 +909,6 @@ export const registerTelegramHandlers = ({
       sendOversizeWarning,
       oversizeLogMessage,
     } = params;
-    runtime.error?.(
-      `[telegram][ingress_trace] processInboundMessage:start chatId=${chatId} messageId=${msg.message_id} hasText=${typeof msg.text === "string" || typeof msg.caption === "string"}`,
-    );
-
     // Text fragment handling - Telegram splits long pastes into multiple inbound messages (~4096 chars).
     // We buffer “near-limit” messages and append immediately-following parts.
     const text = typeof msg.text === "string" ? msg.text : undefined;
@@ -1013,9 +1009,6 @@ export const registerTelegramHandlers = ({
 
     let media: Awaited<ReturnType<typeof resolveMedia>> = null;
     try {
-      runtime.error?.(
-        `[telegram][ingress_trace] processInboundMessage:resolveMedia:start chatId=${chatId} messageId=${msg.message_id}`,
-      );
       media = await resolveMedia(
         ctx,
         mediaMaxBytes,
@@ -1023,13 +1016,7 @@ export const registerTelegramHandlers = ({
         telegramTransport,
         telegramCfg.apiRoot,
       );
-      runtime.error?.(
-        `[telegram][ingress_trace] processInboundMessage:resolveMedia:done chatId=${chatId} messageId=${msg.message_id} hasMedia=${Boolean(media)}`,
-      );
     } catch (mediaErr) {
-      runtime.error?.(
-        `[telegram][ingress_trace] processInboundMessage:resolveMedia:error chatId=${chatId} messageId=${msg.message_id} ${String(mediaErr)}`,
-      );
       if (isMediaSizeLimitError(mediaErr)) {
         if (sendOversizeWarning) {
           const limitMb = Math.round(mediaMaxBytes / (1024 * 1024));
@@ -1098,9 +1085,6 @@ export const registerTelegramHandlers = ({
       debounceLane,
       botUsername: ctx.me?.username,
     });
-    runtime.error?.(
-      `[telegram][ingress_trace] processInboundMessage:queued chatId=${chatId} messageId=${msg.message_id} media=${allMedia.length} debounceKey=${debounceKey ?? "none"}`,
-    );
   };
   bot.on("callback_query", async (ctx) => {
     const callback = ctx.callbackQuery;
@@ -1694,27 +1678,15 @@ export const registerTelegramHandlers = ({
 
   const handleInboundMessageLike = async (event: InboundTelegramEvent) => {
     try {
-      runtime.error?.(
-        `[telegram][ingress_trace] handleInboundMessageLike:start chatId=${event.chatId} messageId=${event.msg.message_id}`,
-      );
       if (shouldSkipUpdate(event.ctxForDedupe)) {
-        runtime.error?.(
-          `[telegram][ingress_trace] handleInboundMessageLike:skipped chatId=${event.chatId} messageId=${event.msg.message_id}`,
-        );
         return;
       }
-      runtime.error?.(
-        `[telegram][ingress_trace] handleInboundMessageLike:auth-context:start chatId=${event.chatId} messageId=${event.msg.message_id}`,
-      );
       const eventAuthContext = await resolveTelegramEventAuthorizationContext({
         chatId: event.chatId,
         isGroup: event.isGroup,
         isForum: event.isForum,
         messageThreadId: event.messageThreadId,
       });
-      runtime.error?.(
-        `[telegram][ingress_trace] handleInboundMessageLike:auth-context:done chatId=${event.chatId} messageId=${event.msg.message_id}`,
-      );
       const {
         dmPolicy,
         resolvedThreadId,
@@ -1735,9 +1707,6 @@ export const registerTelegramHandlers = ({
       });
 
       if (event.requireConfiguredGroup && (!groupConfig || groupConfig.enabled === false)) {
-        runtime.error?.(
-          `[telegram][ingress_trace] handleInboundMessageLike:require-configured-group-block chatId=${event.chatId} messageId=${event.msg.message_id}`,
-        );
         logVerbose(`Blocked telegram channel ${event.chatId} (channel disabled)`);
         return;
       }
@@ -1756,16 +1725,10 @@ export const registerTelegramHandlers = ({
           topicConfig,
         })
       ) {
-        runtime.error?.(
-          `[telegram][ingress_trace] handleInboundMessageLike:group-skip chatId=${event.chatId} messageId=${event.msg.message_id}`,
-        );
         return;
       }
 
       if (!event.isGroup && (hasInboundMedia(event.msg) || hasReplyTargetMedia(event.msg))) {
-        runtime.error?.(
-          `[telegram][ingress_trace] handleInboundMessageLike:dm-access:start chatId=${event.chatId} messageId=${event.msg.message_id}`,
-        );
         const dmAuthorized = await enforceTelegramDmAccess({
           isGroup: event.isGroup,
           dmPolicy,
@@ -1778,19 +1741,10 @@ export const registerTelegramHandlers = ({
           upsertPairingRequest: telegramDeps.upsertChannelPairingRequest,
         });
         if (!dmAuthorized) {
-          runtime.error?.(
-            `[telegram][ingress_trace] handleInboundMessageLike:dm-access:blocked chatId=${event.chatId} messageId=${event.msg.message_id}`,
-          );
           return;
         }
-        runtime.error?.(
-          `[telegram][ingress_trace] handleInboundMessageLike:dm-access:done chatId=${event.chatId} messageId=${event.msg.message_id}`,
-        );
       }
 
-      runtime.error?.(
-        `[telegram][ingress_trace] handleInboundMessageLike:processInbound:start chatId=${event.chatId} messageId=${event.msg.message_id}`,
-      );
       await processInboundMessage({
         ctx: event.ctx,
         msg: event.msg,
@@ -1801,9 +1755,6 @@ export const registerTelegramHandlers = ({
         sendOversizeWarning: event.sendOversizeWarning,
         oversizeLogMessage: event.oversizeLogMessage,
       });
-      runtime.error?.(
-        `[telegram][ingress_trace] handleInboundMessageLike:processInbound:done chatId=${event.chatId} messageId=${event.msg.message_id}`,
-      );
     } catch (err) {
       runtime.error?.(danger(`${event.errorMessage}: ${String(err)}`));
     }
@@ -1811,25 +1762,10 @@ export const registerTelegramHandlers = ({
 
   bot.on("message", async (ctx) => {
     const msg = ctx.message;
-    runtime.error?.(
-      `[telegram][ingress_trace] bot.on(message):start updateId=${
-        "update_id" in ctx.update ? String(ctx.update.update_id ?? "unknown") : "unknown"
-      } hasMessage=${Boolean(msg)}`,
-    );
     if (!msg) {
-      runtime.error?.("[telegram][ingress_trace] bot.on(message):no-message");
-      return;
-    }
-    if (isSelfAuthoredTelegramMessage(ctx, msg)) {
-      runtime.error?.(
-        `[telegram][ingress_trace] bot.on(message):self-authored chatId=${msg.chat.id} messageId=${msg.message_id}`,
-      );
       return;
     }
     const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
-    runtime.error?.(
-      `[telegram][ingress_trace] bot.on(message):forum-resolve:start chatId=${msg.chat.id} messageId=${msg.message_id} isGroup=${isGroup}`,
-    );
     const isForum = await resolveTelegramForumFlag({
       chatId: msg.chat.id,
       chatType: msg.chat.type,
@@ -1837,18 +1773,12 @@ export const registerTelegramHandlers = ({
       isForum: msg.chat.is_forum,
       getChat,
     });
-    runtime.error?.(
-      `[telegram][ingress_trace] bot.on(message):forum-resolve:done chatId=${msg.chat.id} messageId=${msg.message_id} isForum=${isForum}`,
-    );
     const normalizedMsg = withResolvedTelegramForumFlag(msg, isForum);
     // Bot-authored message updates can be echoed back by Telegram. Skip them here
     // and rely on the dedicated channel_post handler for channel-originated posts.
     if (normalizedMsg.from?.id != null && normalizedMsg.from.id === ctx.me?.id) {
       return;
     }
-    runtime.error?.(
-      `[telegram][ingress_trace] bot.on(message):handleInbound:start chatId=${normalizedMsg.chat.id} messageId=${normalizedMsg.message_id}`,
-    );
     await handleInboundMessageLike({
       ctxForDedupe: ctx,
       ctx: buildSyntheticContext(ctx, normalizedMsg),
@@ -1864,9 +1794,6 @@ export const registerTelegramHandlers = ({
       oversizeLogMessage: "media exceeds size limit",
       errorMessage: "handler failed",
     });
-    runtime.error?.(
-      `[telegram][ingress_trace] bot.on(message):handleInbound:done chatId=${normalizedMsg.chat.id} messageId=${normalizedMsg.message_id}`,
-    );
   });
 
   // Handle channel posts — enables bot-to-bot communication via Telegram channels.

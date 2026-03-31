@@ -15,7 +15,6 @@ import {
   updateSessionStoreEntry,
 } from "../../config/sessions.js";
 import type { TypingMode } from "../../config/types.js";
-import { logVerbose } from "../../globals.js";
 import { emitAgentEvent } from "../../infra/agent-events.js";
 import { emitDiagnosticEvent, isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
 import { generateSecureUuid } from "../../infra/secure-random.js";
@@ -65,8 +64,6 @@ import { createTypingSignaler } from "./typing-mode.js";
 import type { TypingController } from "./typing.js";
 
 const BLOCK_REPLY_SEND_TIMEOUT_MS = 15_000;
-const CODEX_RAW_PAYLOAD_LOG_PREFIX = "[codex_raw_payload]";
-const CODEX_REPLY_PAYLOAD_LOG_PREFIX = "[codex_reply_payload]";
 
 export async function runReplyAgent(params: {
   commandBody: string;
@@ -551,8 +548,6 @@ export async function runReplyAgent(params: {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }
 
-    logVerbose(`${CODEX_RAW_PAYLOAD_LOG_PREFIX} ${JSON.stringify(payloadArray)}`);
-
     const payloadResult = await buildReplyPayloads({
       payloads: payloadArray,
       isHeartbeat,
@@ -578,8 +573,6 @@ export async function runReplyAgent(params: {
     });
     const { replyPayloads } = payloadResult;
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
-
-    logVerbose(`${CODEX_REPLY_PAYLOAD_LOG_PREFIX} ${JSON.stringify(replyPayloads)}`);
 
     if (replyPayloads.length === 0) {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);

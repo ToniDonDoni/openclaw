@@ -120,23 +120,18 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
     const proxyFetch =
       opts.proxyFetch ?? (account.config.proxy ? makeProxyFetch(account.config.proxy) : undefined);
 
-    log("[telegram][startup_trace] exec approvals init");
     execApprovalsHandler = new TelegramExecApprovalHandler({
       token,
       accountId: account.accountId,
       cfg,
       runtime: opts.runtime,
     });
-    log("[telegram][startup_trace] exec approvals start");
     await execApprovalsHandler.start();
-    log("[telegram][startup_trace] exec approvals ready");
 
-    log("[telegram][startup_trace] update offset read:start");
     const persistedOffsetRaw = await readTelegramUpdateOffset({
       accountId: account.accountId,
       botToken: token,
     });
-    log(`[telegram][startup_trace] update offset read:done value=${persistedOffsetRaw ?? "null"}`);
     let lastUpdateId = normalizePersistedUpdateId(persistedOffsetRaw);
     if (persistedOffsetRaw !== null && lastUpdateId === null) {
       log(
@@ -188,15 +183,12 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
 
     // Preserve sticky IPv4 fallback state across clean/conflict restarts.
     // Dirty polling cycles rebuild transport inside TelegramPollingSession.
-    log("[telegram][startup_trace] transport create:start");
     const createTelegramTransportForPolling = () =>
       resolveTelegramTransport(proxyFetch, {
         network: account.config.network,
       });
     const telegramTransport = createTelegramTransportForPolling();
-    log("[telegram][startup_trace] transport create:done");
 
-    log("[telegram][startup_trace] polling session init");
     pollingSession = new TelegramPollingSession({
       token,
       config: cfg,
@@ -211,7 +203,6 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
       telegramTransport,
       createTelegramTransport: createTelegramTransportForPolling,
     });
-    log("[telegram][startup_trace] polling session run");
     await pollingSession.runUntilAbort();
   } finally {
     await execApprovalsHandler?.stop().catch(() => {});
