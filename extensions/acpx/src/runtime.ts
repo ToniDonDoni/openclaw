@@ -22,6 +22,7 @@ import {
 } from "./runtime-internals/events.js";
 import {
   buildMcpProxyAgentCommand,
+  resolveLocalAcpxAgentCommand,
   resolveAcpxAgentCommand,
 } from "./runtime-internals/mcp-agent-command.js";
 import {
@@ -1066,13 +1067,22 @@ export class AcpxRuntime implements AcpRuntime {
     agent: string;
     cwd: string;
   }): Promise<string | null> {
-    if (Object.keys(this.config.mcpServers).length === 0) {
-      return null;
-    }
     const cacheKey = `${params.cwd}::${params.agent}`;
     const cached = this.mcpProxyAgentCommandCache.get(cacheKey);
     if (cached) {
       return cached;
+    }
+    const local = resolveLocalAcpxAgentCommand(params.agent);
+    if (local) {
+      if (Object.keys(this.config.mcpServers).length === 0) {
+        return local;
+      }
+      const resolved = buildMcpProxyAgentCommand({
+        targetCommand: local,
+        mcpServers: toAcpMcpServers(this.config.mcpServers),
+      });
+      this.mcpProxyAgentCommandCache.set(cacheKey, resolved);
+      return resolved;
     }
     const targetCommand = await resolveAcpxAgentCommand({
       acpxCommand: this.config.command,
@@ -1082,6 +1092,9 @@ export class AcpxRuntime implements AcpRuntime {
       spawnOptions: this.spawnCommandOptions,
     });
     if (!targetCommand) {
+      return null;
+    }
+    if (Object.keys(this.config.mcpServers).length === 0) {
       return null;
     }
     const resolved = buildMcpProxyAgentCommand({

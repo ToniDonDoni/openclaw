@@ -20,6 +20,13 @@ const ACPX_BUILTIN_AGENT_COMMANDS: Record<string, string> = {
   qwen: "qwen --acp",
 };
 
+const LOCAL_AGENT_COMMANDS: Record<string, string> = {
+  "opencode-serve": toCommandLine([
+    process.execPath,
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), "opencode-serve-agent.mjs"),
+  ]),
+};
+
 const MCP_PROXY_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "mcp-proxy.mjs");
 
 type AcpxConfigDisplay = {
@@ -50,6 +57,10 @@ function quoteCommandPart(value: string): string {
 export const __testing = {
   quoteCommandPart,
 };
+
+export function resolveLocalAcpxAgentCommand(agent: string): string | null {
+  return LOCAL_AGENT_COMMANDS[normalizeAgentName(agent)] ?? null;
+}
 
 function toCommandLine(parts: string[]): string {
   return parts.map(quoteCommandPart).join(" ");
@@ -107,6 +118,10 @@ export async function resolveAcpxAgentCommand(params: {
   spawnOptions?: SpawnCommandOptions;
 }): Promise<string | null> {
   const normalizedAgent = normalizeAgentName(params.agent);
+  const local = LOCAL_AGENT_COMMANDS[normalizedAgent];
+  if (local) {
+    return local;
+  }
   const overrides = await loadAgentOverrides({
     acpxCommand: params.acpxCommand,
     cwd: params.cwd,

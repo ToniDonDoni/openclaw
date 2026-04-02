@@ -36,6 +36,19 @@ describe("resolveAcpxAgentCommand", () => {
     expect(command).toBe(expected);
   });
 
+  it("uses the bundled local opencode serve bridge without probing acpx config", async () => {
+    spawnAndCollectMock.mockClear();
+    const command = await resolveAcpxAgentCommand({
+      acpxCommand: "/plugin/node_modules/.bin/acpx",
+      cwd: "/plugin",
+      agent: "opencode-serve",
+    });
+
+    expect(command).toContain("opencode-serve-agent.mjs");
+    expect(command).toContain(process.execPath);
+    expect(spawnAndCollectMock).not.toHaveBeenCalled();
+  });
+
   it("returns null for unknown agent ids instead of falling back to raw commands", async () => {
     spawnAndCollectMock.mockResolvedValueOnce({
       stdout: JSON.stringify({ agents: {} }),
