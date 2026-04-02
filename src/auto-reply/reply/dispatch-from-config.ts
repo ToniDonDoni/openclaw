@@ -623,6 +623,10 @@ export async function dispatchReplyFromConfig(params: {
     // summaries should be delivered into the topic thread, same as DMs.
     const shouldSendToolSummaries =
       (ctx.ChatType !== "group" || ctx.IsForum === true) && ctx.CommandSource !== "native";
+    // Keep `suppressUserDelivery` based on the inbound `sessionKey`, even when
+    // dispatching to `acpDispatchSessionKey`, because bound conversation messages are
+    // expected to go through the user-facing session, not directly to an internal child
+    // session.
     const acpDispatch = await dispatchAcpRuntime.tryDispatchAcpReply({
       ctx,
       cfg,
