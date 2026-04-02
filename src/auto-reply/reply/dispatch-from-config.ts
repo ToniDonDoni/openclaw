@@ -23,6 +23,7 @@ import {
   toPluginMessageReceivedEvent,
 } from "../../hooks/message-hook-mappers.js";
 import { isDiagnosticsEnabled } from "../../infra/diagnostic-events.js";
+import { getSessionBindingService } from "../../infra/outbound/session-binding-service.js";
 import {
   logMessageProcessed,
   logMessageQueued,
@@ -43,6 +44,7 @@ import { normalizeTtsAutoMode, resolveConfiguredTtsMode } from "../../tts/tts-co
 import { normalizeMessageChannel } from "../../utils/message-channel.js";
 import type { FinalizedMsgContext } from "../templating.js";
 import type { BlockReplyContext, GetReplyOptions, ReplyPayload } from "../types.js";
+import { resolveConversationBindingContextFromMessage } from "./conversation-binding-input.js";
 import { shouldSkipDuplicateInbound } from "./inbound-dedupe.js";
 import type { ReplyDispatcher, ReplyDispatchKind } from "./reply-dispatcher.js";
 import { resolveReplyRoutingDecision } from "./routing-policy.js";
@@ -124,7 +126,20 @@ const resolveSessionStoreLookup = (
 } => {
   const targetSessionKey =
     ctx.CommandSource === "native" ? ctx.CommandTargetSessionKey?.trim() : undefined;
-  const sessionKey = (targetSessionKey ?? ctx.SessionKey)?.trim();
+  const binding = resolveConversationBindingContextFromMessage({ cfg, ctx });
+  const boundSessionKey = binding
+    ? getSessionBindingService()
+        .resolveByConversation({
+          channel: binding.channel,
+          accountId: binding.accountId,
+          conversationId: binding.conversationId,
+          ...(binding.parentConversationId
+            ? { parentConversationId: binding.parentConversationId }
+            : {}),
+        })
+        ?.targetSessionKey?.trim()
+    : undefined;
+  const sessionKey = (targetSessionKey ?? boundSessionKey ?? ctx.SessionKey)?.trim();
   if (!sessionKey) {
     return {};
   }
