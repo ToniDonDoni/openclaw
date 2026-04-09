@@ -738,16 +738,17 @@ export function createHookRunner(registry: PluginRegistry, options: HookRunnerOp
       ctx,
       {
         mergeResults: (acc, next) => {
-          if (acc?.cancel === true) {
+          if (acc?.cancel === true || acc?.followup) {
             return acc;
           }
           return {
             content: lastDefined(acc?.content, next.content),
             cancel: stickyTrue(acc?.cancel, next.cancel),
+            followup: acc?.followup ?? next.followup,
           };
         },
-        shouldStop: (result) => result.cancel === true,
-        terminalLabel: "cancel=true",
+        shouldStop: (result) => result.cancel === true || Boolean(result.followup),
+        terminalLabel: "cancel=true/followup",
       },
     );
   }

@@ -2686,9 +2686,15 @@ export type PluginHookMessageSendingEvent = {
   metadata?: Record<string, unknown>;
 };
 
+export type PluginHookMessageSendingFollowup = {
+  /** Prompt for a follow-up agent turn on the same delivery route. */
+  prompt: string;
+};
+
 export type PluginHookMessageSendingResult = {
   content?: string;
   cancel?: boolean;
+  followup?: PluginHookMessageSendingFollowup;
 };
 
 // message_sent hook

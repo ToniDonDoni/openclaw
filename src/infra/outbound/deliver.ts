@@ -446,12 +446,14 @@ async function applyMessageSendingHook(params: {
   accountId?: string;
 }): Promise<{
   cancelled: boolean;
+  followupRequested: boolean;
   payload: ReplyPayload;
   payloadSummary: NormalizedOutboundPayload;
 }> {
   if (!params.enabled) {
     return {
       cancelled: false,
+      followupRequested: false,
       payload: params.payload,
       payloadSummary: params.payloadSummary,
     };
@@ -472,9 +474,22 @@ async function applyMessageSendingHook(params: {
         accountId: params.accountId ?? undefined,
       },
     );
+    if (sendingResult?.followup) {
+      log.warn("deliverOutboundPayloads: message_sending followup unsupported on this route", {
+        channel: params.channel,
+        to: params.to,
+      });
+      return {
+        cancelled: true,
+        followupRequested: true,
+        payload: params.payload,
+        payloadSummary: params.payloadSummary,
+      };
+    }
     if (sendingResult?.cancel) {
       return {
         cancelled: true,
+        followupRequested: false,
         payload: params.payload,
         payloadSummary: params.payloadSummary,
       };
@@ -482,6 +497,7 @@ async function applyMessageSendingHook(params: {
     if (sendingResult?.content == null) {
       return {
         cancelled: false,
+        followupRequested: false,
         payload: params.payload,
         payloadSummary: params.payloadSummary,
       };
@@ -492,6 +508,7 @@ async function applyMessageSendingHook(params: {
     };
     return {
       cancelled: false,
+      followupRequested: false,
       payload,
       payloadSummary: {
         ...params.payloadSummary,
@@ -502,6 +519,7 @@ async function applyMessageSendingHook(params: {
     // Don't block delivery on hook failure.
     return {
       cancelled: false,
+      followupRequested: false,
       payload: params.payload,
       payloadSummary: params.payloadSummary,
     };

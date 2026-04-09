@@ -842,6 +842,25 @@ describe("deliverOutboundPayloads", () => {
     expect(hookMocks.runner.runMessageSent).not.toHaveBeenCalled();
   });
 
+  it("cancels delivery when message_sending requests an unsupported followup", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(true);
+    hookMocks.runner.runMessageSending.mockResolvedValue({
+      followup: { prompt: "self-check" },
+    });
+
+    const sendWhatsApp = vi.fn().mockResolvedValue({ messageId: "w1", toJid: "jid" });
+    await deliverOutboundPayloads({
+      cfg: {},
+      channel: "whatsapp",
+      to: "+1555",
+      payloads: [{ text: "hello" }],
+      deps: { whatsapp: sendWhatsApp },
+    });
+
+    expect(sendWhatsApp).not.toHaveBeenCalled();
+    expect(hookMocks.runner.runMessageSent).not.toHaveBeenCalled();
+  });
+
   it("emits message_sent success for sendPayload deliveries", async () => {
     hookMocks.runner.hasHooks.mockReturnValue(true);
     const sendPayload = vi.fn().mockResolvedValue({ channel: "matrix", messageId: "mx-1" });

@@ -1,4 +1,5 @@
 import type { Bot } from "grammy";
+import type { OpenClawPluginCommandDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createTestPluginApi } from "../../../../test/helpers/plugins/plugin-api.js";
@@ -27,9 +28,7 @@ type DeliverWithParams = Omit<
 > &
   Partial<Pick<DeliverRepliesParams, "replyToMode" | "textLimit" | "mediaLoader">>;
 type RuntimeStub = Pick<RuntimeEnv, "error" | "log" | "exit">;
-type RegisteredCommand = {
-  handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
-};
+type RegisteredCommand = Pick<OpenClawPluginCommandDefinition, "handler">;
 
 vi.mock("openclaw/plugin-sdk/web-media", () => ({
   loadWebMedia: (...args: unknown[]) => loadWebMedia(...args),
@@ -328,7 +327,6 @@ describe("deliverReplies", () => {
   });
 
   it("runs the real self-check-gate message_sending hook on Telegram delivery after /selfcheck on", async () => {
-    vi.useFakeTimers();
     const {
       logger,
       runEmbeddedPiAgent,
@@ -366,6 +364,7 @@ describe("deliverReplies", () => {
     const runtime = createRuntime(false);
     const sendMessage = vi.fn().mockResolvedValue({ message_id: 41, chat: { id: "123" } });
     const bot = createBot({ sendMessage });
+    const onMessageSendingFollowup = vi.fn(async () => {});
 
     await deliverWith({
       accountId: "default",
@@ -379,6 +378,7 @@ describe("deliverReplies", () => {
       replies: [{ text: "final answer" }],
       runtime,
       bot,
+      onMessageSendingFollowup,
     });
 
     expect(messageHookRunner.runMessageSending).toHaveBeenCalledTimes(2);
@@ -415,17 +415,9 @@ describe("deliverReplies", () => {
     expect(sendMessage).toHaveBeenCalledTimes(1);
     expect(sendMessage).toHaveBeenCalledWith("123", expect.any(String), expect.any(Object));
     expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
+    expect(onMessageSendingFollowup).toHaveBeenCalledTimes(1);
+    expect(onMessageSendingFollowup).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionId: "session-1",
-        sessionKey: "agent-main:session-1",
-        agentId: "agent-main",
-        messageChannel: "telegram",
-        agentAccountId: "default",
-        messageThreadId: "thread-1",
-        disableMessageTool: true,
         prompt: expect.stringContaining("SELF_CHECK_MODE"),
       }),
     );
@@ -455,13 +447,11 @@ describe("deliverReplies", () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
     );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: deliverReplies followup_requested"),
     );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "self-check-gate: message_sending cancel reason=self_check_scheduled",
-      ),
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: deliverReplies followup_executed"),
     );
   });
 

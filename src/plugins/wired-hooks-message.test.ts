@@ -50,6 +50,12 @@ describe("message_sending hook runner", () => {
       hookResult: { cancel: true },
       expected: { cancel: true },
     },
+    {
+      name: "runMessageSending can request a followup turn",
+      event: { to: "user-123", content: "needs followup" },
+      hookResult: { followup: { prompt: "check again" } },
+      expected: { followup: { prompt: "check again" } },
+    },
   ] as const)("$name", async ({ event, hookResult, expected }) => {
     await expectMessageHookCall({
       hookName: "message_sending",

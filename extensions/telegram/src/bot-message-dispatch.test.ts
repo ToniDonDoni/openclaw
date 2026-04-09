@@ -1,4 +1,5 @@
 import type { Bot } from "grammy";
+import type { OpenClawPluginCommandDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveChunkMode as resolveChunkModeRuntime } from "../../../src/auto-reply/chunk.js";
 import { resolveMarkdownTableMode as resolveMarkdownTableModeRuntime } from "../../../src/config/markdown-tables.js";
@@ -17,9 +18,7 @@ import {
 type DispatchReplyWithBufferedBlockDispatcherArgs = Parameters<
   TelegramBotDeps["dispatchReplyWithBufferedBlockDispatcher"]
 >[0];
-type RegisteredCommand = {
-  handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
-};
+type RegisteredCommand = Pick<OpenClawPluginCommandDefinition, "handler">;
 
 const createTelegramDraftStream = vi.hoisted(() => vi.fn());
 const dispatchReplyWithBufferedBlockDispatcher = vi.hoisted(() =>
@@ -748,7 +747,6 @@ describe("dispatchTelegramMessage draft streaming", () => {
   });
 
   it("runs self-check-gate on preview finalization and retracts the preview when canceled", async () => {
-    vi.useFakeTimers();
     const { logger, runEmbeddedPiAgent, selfCheckCommand, messageSendingHook } =
       await createSelfCheckGateHarness();
     getGlobalHookRunner.mockReturnValue({
@@ -779,13 +777,27 @@ describe("dispatchTelegramMessage draft streaming", () => {
 
     const draftStream = createSequencedDraftStream(1001);
     createTelegramDraftStream.mockReturnValue(draftStream);
+    let dispatchCallCount = 0;
     dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
-      async ({ dispatcherOptions, replyOptions }) => {
-        await replyOptions?.onPartialReply?.({ text: "preview text the user can see" });
-        await dispatcherOptions.deliver(
-          { text: "final answer that should trigger self-check" },
-          { kind: "final" },
-        );
+      async ({ ctx, dispatcherOptions, replyOptions }) => {
+        dispatchCallCount += 1;
+        if (dispatchCallCount === 1) {
+          await replyOptions?.onPartialReply?.({ text: "preview text the user can see" });
+          await dispatcherOptions.deliver(
+            { text: "final answer that should trigger self-check" },
+            { kind: "final" },
+          );
+          return { queuedFinal: true };
+        }
+        expect(ctx).toMatchObject({
+          SessionKey: "agent-main:session-1",
+          Body: expect.stringContaining("SELF_CHECK_MODE"),
+          CommandBody: expect.stringContaining("SELF_CHECK_MODE"),
+        });
+        expect(ctx.MessageSid).toBeUndefined();
+        expect(ctx.MessageSidFull).toBeUndefined();
+        expect(ctx.MessageSidFirst).toBeUndefined();
+        expect(ctx.MessageSidLast).toBeUndefined();
         return { queuedFinal: true };
       },
     );
@@ -794,7 +806,11 @@ describe("dispatchTelegramMessage draft streaming", () => {
     const runtime = createRuntime();
     await dispatchWithContext({
       context: createContext({
-        ctxPayload: { SessionKey: "agent-main:session-1" } as TelegramMessageContext["ctxPayload"],
+        ctxPayload: {
+          SessionKey: "agent-main:session-1",
+          MessageSid: "284",
+          MessageSidFull: "telegram:284",
+        } as TelegramMessageContext["ctxPayload"],
       }),
       bot,
       runtime,
@@ -808,42 +824,27 @@ describe("dispatchTelegramMessage draft streaming", () => {
     );
     expect(bot.api.deleteMessage).toHaveBeenCalledWith(123, 1001);
     expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "session-1",
-        sessionKey: "agent-main:session-1",
-        agentId: "agent-main",
-        messageChannel: "telegram",
-        agentAccountId: "default",
-        messageThreadId: "thread-1",
-        disableMessageTool: true,
-        prompt: expect.stringContaining("SELF_CHECK_MODE"),
-      }),
-    );
+    expect(dispatchReplyWithBufferedBlockDispatcher).toHaveBeenCalledTimes(2);
     expect(runtime.log).toHaveBeenCalledWith(
       expect.stringContaining("telegram-delivery-path: preview-final-hook enter"),
     );
     expect(runtime.log).toHaveBeenCalledWith(
-      expect.stringContaining("telegram-delivery-path: preview-final-hook cancel"),
+      expect.stringContaining("telegram-delivery-path: preview-final-hook followup"),
     );
     expect(runtime.log).toHaveBeenCalledWith(
       expect.stringContaining("telegram-delivery-path: preview-final-hook retracted_preview"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: followup_dispatch start"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: followup_dispatch complete"),
     );
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("self-check-gate: message_sending phase_transition"),
     );
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "self-check-gate: message_sending cancel reason=self_check_scheduled",
-      ),
     );
   });
 

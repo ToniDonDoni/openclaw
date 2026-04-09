@@ -66,10 +66,10 @@ async function applySlackMessageSendingHooks(params: {
   threadTs?: string;
   accountId?: string;
   mediaUrl?: string;
-}): Promise<{ cancelled: boolean; text: string }> {
+}): Promise<{ cancelled: boolean; text: string; followupRequested: boolean }> {
   const hookRunner = getGlobalHookRunner();
   if (!hookRunner?.hasHooks("message_sending")) {
-    return { cancelled: false, text: params.text };
+    return { cancelled: false, text: params.text, followupRequested: false };
   }
   const account = resolveSlackAccount({
     cfg: params.cfg,
@@ -87,10 +87,17 @@ async function applySlackMessageSendingHooks(params: {
     },
     { channelId: "slack", accountId: account.accountId },
   );
-  if (hookResult?.cancel) {
-    return { cancelled: true, text: params.text };
+  if (hookResult?.followup) {
+    return { cancelled: true, text: params.text, followupRequested: true };
   }
-  return { cancelled: false, text: hookResult?.content ?? params.text };
+  if (hookResult?.cancel) {
+    return { cancelled: true, text: params.text, followupRequested: false };
+  }
+  return {
+    cancelled: false,
+    text: hookResult?.content ?? params.text,
+    followupRequested: false,
+  };
 }
 
 async function sendSlackOutboundMessage(params: {
@@ -128,7 +135,10 @@ async function sendSlackOutboundMessage(params: {
     return {
       messageId: "cancelled-by-hook",
       channelId: params.to,
-      meta: { cancelled: true },
+      meta: {
+        cancelled: true,
+        ...(hookResult.followupRequested ? { followupRequested: true } : {}),
+      },
     };
   }
 

@@ -1,11 +1,10 @@
+import type { OpenClawPluginCommandDefinition } from "openclaw/plugin-sdk/plugin-entry";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createTestPluginApi } from "../../test/helpers/plugins/plugin-api.js";
 import type { OpenClawPluginApi } from "./api.js";
 import plugin from "./index.js";
 
-type RegisteredCommand = {
-  handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
-};
+type RegisteredCommand = Pick<OpenClawPluginCommandDefinition, "handler">;
 
 describe("self-check-gate plugin", () => {
   afterEach(() => {
@@ -135,7 +134,6 @@ describe("self-check-gate plugin", () => {
   });
 
   it("reuses armed session state for the next relevant outbound after /selfcheck on", async () => {
-    vi.useFakeTimers();
     const commands = new Map<string, RegisteredCommand>();
     const hooks = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
     const logger = {
@@ -245,23 +243,12 @@ describe("self-check-gate plugin", () => {
     );
 
     expect(armAckResult).toBeUndefined();
-    expect(result).toEqual({ cancel: true });
+    expect(result).toEqual({
+      followup: {
+        prompt: expect.stringContaining("SELF_CHECK_MODE"),
+      },
+    });
     expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
-    expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: "session-1",
-        sessionKey: "agent-main:session-1",
-        agentId: "agent-main",
-        provider: "openai-codex",
-        model: "gpt-5.4",
-        authProfileId: "openai-codex:default",
-        authProfileIdSource: "user",
-      }),
-    );
     expect(logger.info).not.toHaveBeenCalledWith(
       expect.stringContaining("message_sending allow reason=no_armed_binding"),
     );
@@ -295,14 +282,9 @@ describe("self-check-gate plugin", () => {
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("runtimeProvider=openai-codex"),
     );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("runtimeModel=gpt-5.4"),
-    );
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("runtimeModel=gpt-5.4"));
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("message_sending phase_transition sessionKey=agent-main:session-1"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
     );
   });
 

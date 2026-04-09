@@ -46,7 +46,13 @@ async function runMessageSendingWithHooks(
 }
 
 function expectTerminalHookState<
-  TResult extends { block?: boolean; blockReason?: string; cancel?: boolean; content?: string },
+  TResult extends {
+    block?: boolean;
+    blockReason?: string;
+    cancel?: boolean;
+    content?: string;
+    followup?: { prompt: string };
+  },
 >(result: TResult | undefined, expected: Partial<TResult>) {
   if ("block" in expected) {
     expect(result?.block).toBe(expected.block);
@@ -59,6 +65,9 @@ function expectTerminalHookState<
   }
   if ("content" in expected) {
     expect(result?.content).toBe(expected.content);
+  }
+  if ("followup" in expected) {
+    expect(result?.followup).toEqual(expected.followup);
   }
 }
 
@@ -228,6 +237,14 @@ describe("message_sending terminal cancel semantics", () => {
       ],
       expected: { cancel: true },
     },
+    {
+      name: "treats followup as terminal and preserves the first requested prompt",
+      hooks: [
+        { pluginId: "high", result: { followup: { prompt: "self-check" } }, priority: 100 },
+        { pluginId: "low", result: { cancel: true, content: "override" }, priority: 10 },
+      ],
+      expected: { followup: { prompt: "self-check" } },
+    },
   ] as const)("$name", async ({ hooks, expected }) => {
     const result = await runMessageSendingWithHooks(registry, hooks);
     expectTerminalHookState(result, expected);
@@ -253,6 +270,29 @@ describe("message_sending terminal cancel semantics", () => {
 
     expect(result?.cancel).toBe(true);
     expect(result?.content).toBe("guarded");
+    expect(high).toHaveBeenCalledTimes(1);
+    expect(low).not.toHaveBeenCalled();
+  });
+
+  it("short-circuits lower-priority hooks after followup is requested", async () => {
+    const high = vi.fn().mockReturnValue({ followup: { prompt: "continue working" } });
+    const low = vi.fn().mockReturnValue({ cancel: true, content: "mutated" });
+    const result = await runMessageSendingWithHooks(registry, [
+      {
+        pluginId: "high",
+        result: { followup: { prompt: "continue working" } },
+        priority: 100,
+        handler: high,
+      },
+      {
+        pluginId: "low",
+        result: { cancel: true, content: "mutated" },
+        priority: 10,
+        handler: low,
+      },
+    ]);
+
+    expect(result?.followup).toEqual({ prompt: "continue working" });
     expect(high).toHaveBeenCalledTimes(1);
     expect(low).not.toHaveBeenCalled();
   });

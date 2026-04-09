@@ -133,4 +133,25 @@ describe("slackOutbound", () => {
       meta: { cancelled: true },
     });
   });
+
+  it("cancels sendMedia when message_sending requests an unsupported followup", async () => {
+    hasHooksMock.mockReturnValue(true);
+    runMessageSendingMock.mockResolvedValue({ followup: { prompt: "self-check" } });
+
+    const result = await slackOutbound.sendMedia!({
+      cfg,
+      to: "C123",
+      text: "caption",
+      mediaUrl: "https://example.com/image.png",
+      accountId: "default",
+      replyToId: "1712000000.000001",
+    });
+
+    expect(sendMessageSlackMock).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      channel: "slack",
+      messageId: "cancelled-by-hook",
+      meta: { cancelled: true, followupRequested: true },
+    });
+  });
 });

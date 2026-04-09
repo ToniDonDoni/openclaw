@@ -50,6 +50,10 @@ type DeliveryProgress = ReplyThreadDeliveryProgress & {
   deliveredCount: number;
 };
 
+type MessageSendingFollowup = {
+  prompt: string;
+};
+
 type TelegramReplyChannelData = {
   buttons?: TelegramInlineButtons;
   pin?: boolean;
@@ -609,6 +613,8 @@ export async function deliverReplies(params: {
   replyQuoteText?: string;
   /** Override media loader (tests). */
   mediaLoader?: typeof loadWebMedia;
+  /** Optional rerun handler for message_sending follow-up outcomes. */
+  onMessageSendingFollowup?: (followup: MessageSendingFollowup) => Promise<void> | void;
 }): Promise<{ delivered: boolean }> {
   const progress: DeliveryProgress = {
     hasReplied: false,
@@ -669,6 +675,25 @@ export async function deliverReplies(params: {
           conversationId: params.chatId,
         },
       );
+      if (hookResult?.followup) {
+        logTelegramDeliveryPath(
+          params.runtime,
+          `deliverReplies followup_requested chatId=${params.chatId} contentLength=${rawContent.length}`,
+        );
+        if (params.onMessageSendingFollowup) {
+          await params.onMessageSendingFollowup(hookResult.followup);
+          logTelegramDeliveryPath(
+            params.runtime,
+            `deliverReplies followup_executed chatId=${params.chatId}`,
+          );
+        } else {
+          logTelegramDeliveryPath(
+            params.runtime,
+            `deliverReplies followup_unsupported chatId=${params.chatId}`,
+          );
+        }
+        continue;
+      }
       if (hookResult?.cancel) {
         logTelegramDeliveryPath(
           params.runtime,

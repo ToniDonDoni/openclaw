@@ -72,7 +72,6 @@ type SessionRuntimeSelection = {
 const TELEGRAM_CHANNEL_ID = "telegram";
 const MAX_ATTEMPTS = 6;
 const MAX_SAME_HASH = 2;
-const SELF_CHECK_FOLLOWUP_DELAY_MS = 1000;
 type SelfCheckLogFn = (message: string, meta?: Record<string, unknown>) => void;
 
 function summarizeStoreKeys(store: SessionStore): string[] {
@@ -225,12 +224,6 @@ function clearGateState(entry: SelfCheckSessionEntry): void {
 
 function stableHash(input: string): string {
   return crypto.createHash("sha256").update(input).digest("hex").slice(0, 16);
-}
-
-function waitForDelay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 function formatStateLabel(state: SelfCheckVerdictState): string {
@@ -674,97 +667,12 @@ async function disarmCurrentSession(
   return `Self-check gate disabled for this session (${sessionKey}).`;
 }
 
-async function scheduleSelfCheckFollowup(
-  info: SelfCheckLogFn,
-  api: OpenClawPluginApi,
-  params: {
-    agentId: string;
-    sessionId: string;
-    sessionKey: string;
-    channelId: string;
-    accountId?: string;
-    messageThreadId?: string | number;
-    prompt: string;
-    delayMs?: number;
-    runtimeSelection?: SessionRuntimeSelection;
-  },
-): Promise<void> {
-  info("ENTER scheduleSelfCheckFollowup", {
-    agentId: params.agentId,
-    sessionId: params.sessionId,
-    sessionKey: params.sessionKey,
-    channelId: params.channelId,
-    accountId: params.accountId,
-    messageThreadId: params.messageThreadId,
-    delayMs: params.delayMs ?? 0,
-    provider: params.runtimeSelection?.provider,
-    model: params.runtimeSelection?.model,
-    authProfileId: params.runtimeSelection?.authProfileId,
-    authProfileIdSource: params.runtimeSelection?.authProfileIdSource,
-  });
-  const runParams = {
-    sessionId: params.sessionId,
-    sessionKey: params.sessionKey,
-    agentId: params.agentId,
-    messageChannel: params.channelId,
-    agentAccountId: params.accountId,
-    messageTo: params.sessionKey,
-    messageThreadId: params.messageThreadId,
-    trigger: "manual",
-    prompt: params.prompt,
-    config: api.config,
-    workspaceDir: api.config.agents?.defaults?.workspace ?? process.cwd(),
-    sessionFile: api.runtime.agent.session.resolveSessionFilePath(params.sessionId, undefined, {
-      agentId: params.agentId,
-    }),
-    timeoutMs: 30 * 60 * 1000,
-    runId: `self-check-gate:${params.sessionKey}:${Date.now()}`,
-    disableTools: false,
-    disableMessageTool: true,
-    allowGatewaySubagentBinding: false,
-    ...(params.runtimeSelection?.provider ? { provider: params.runtimeSelection.provider } : {}),
-    ...(params.runtimeSelection?.model ? { model: params.runtimeSelection.model } : {}),
-    ...(params.runtimeSelection?.authProfileId
-      ? { authProfileId: params.runtimeSelection.authProfileId }
-      : {}),
-    ...(params.runtimeSelection?.authProfileId && params.runtimeSelection.authProfileIdSource
-      ? { authProfileIdSource: params.runtimeSelection.authProfileIdSource }
-      : {}),
+function buildMessageSendingFollowup(prompt: string): { followup: { prompt: string } } {
+  return {
+    followup: {
+      prompt,
+    },
   };
-  const startFollowup = async () => {
-    info("scheduleSelfCheckFollowup start_run", {
-      sessionKey: params.sessionKey,
-      delayMs: params.delayMs ?? 0,
-      provider: params.runtimeSelection?.provider,
-      model: params.runtimeSelection?.model,
-      authProfileId: params.runtimeSelection?.authProfileId,
-      authProfileIdSource: params.runtimeSelection?.authProfileIdSource,
-    });
-    await api.runtime.agent.runEmbeddedPiAgent(runParams);
-  };
-  if (typeof params.delayMs === "number" && params.delayMs > 0) {
-    info("scheduleSelfCheckFollowup delayed_launch", {
-      sessionKey: params.sessionKey,
-      delayMs: params.delayMs,
-    });
-    void waitForDelay(params.delayMs)
-      .then(startFollowup)
-      .catch((error: unknown) => {
-        const message =
-          error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
-        api.logger.warn(
-          `self-check-gate: scheduleSelfCheckFollowup failed sessionKey=${params.sessionKey} delayMs=${params.delayMs} error=${message}`,
-        );
-      });
-    return;
-  }
-  void startFollowup().catch((error: unknown) => {
-    const message =
-      error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
-    api.logger.warn(
-      `self-check-gate: scheduleSelfCheckFollowup failed sessionKey=${params.sessionKey} error=${message}`,
-    );
-  });
 }
 
 function buildContinuePrompt(verdict: SelfCheckVerdict, gate: SelfCheckGateState): string {
@@ -980,7 +888,6 @@ export default definePluginEntry({
           sameHashCount: nextGate.sameHashCount,
         });
         writeGateState(binding.entry, nextGate);
-        const sessionId = normalizeText(binding.entry.sessionId) || binding.sessionKey;
         await saveSessionStore(info, api, binding.storePath, {
           ...(await loadSessionStore(api, binding.storePath, info)),
           [binding.sessionKey]: binding.entry,
@@ -988,35 +895,18 @@ export default definePluginEntry({
         info("message_sending schedule_followup", {
           kind: "self_check",
           sessionKey: binding.sessionKey,
-          sessionId,
-          delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
+          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
           messageThreadId:
             binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
         });
-        await scheduleSelfCheckFollowup(info, api, {
-          agentId: binding.agentId,
-          sessionId,
-          sessionKey: binding.sessionKey,
-          channelId: TELEGRAM_CHANNEL_ID,
-          accountId:
-            normalizeText(hookCtx.accountId) ||
-            normalizeText(binding.entry.deliveryContext?.accountId),
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
-          prompt: formatSelfCheckPrompt(info, {
+        return buildMessageSendingFollowup(
+          formatSelfCheckPrompt(info, {
             sessionKey: binding.sessionKey,
             attempts: nextGate.attempts,
             sameHashCount: nextGate.sameHashCount,
             pendingFinal: content,
           }),
-          runtimeSelection,
-        });
-        info("message_sending cancel", {
-          reason: "self_check_scheduled",
-          sessionKey: binding.sessionKey,
-        });
-        return { cancel: true };
+        );
       }
 
       if (gate.phase === "self_check") {
@@ -1059,24 +949,7 @@ export default definePluginEntry({
             messageThreadId:
               binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
           });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: fallbackGate.pendingFinal || "",
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "invalid_verdict_release_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
+          return buildMessageSendingFollowup(fallbackGate.pendingFinal || "");
         }
 
         const sameHashCount =
@@ -1119,24 +992,7 @@ export default definePluginEntry({
             messageThreadId:
               binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
           });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: stopper.pendingFinal || "",
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "stop_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
+          return buildMessageSendingFollowup(stopper.pendingFinal || "");
         }
 
         if (verdict.state === "continue") {
@@ -1171,24 +1027,7 @@ export default definePluginEntry({
             messageThreadId:
               binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
           });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: buildContinuePrompt(verdict, nextGate),
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "continue_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
+          return buildMessageSendingFollowup(buildContinuePrompt(verdict, nextGate));
         }
 
         const releaseKind: ReleaseKind =
@@ -1232,28 +1071,11 @@ export default definePluginEntry({
           messageThreadId:
             binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
         });
-        await scheduleSelfCheckFollowup(info, api, {
-          agentId: binding.agentId,
-          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-          sessionKey: binding.sessionKey,
-          channelId: TELEGRAM_CHANNEL_ID,
-          accountId:
-            normalizeText(hookCtx.accountId) ||
-            normalizeText(binding.entry.deliveryContext?.accountId),
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          prompt:
-            releaseKind === "final"
-              ? formatReleasePrompt(info, { state: nextGate, reason: verdict.reason })
-              : nextGate.pendingFinal || "",
-          runtimeSelection,
-        });
-        info("message_sending cancel", {
-          reason: "release_followup_scheduled",
-          sessionKey: binding.sessionKey,
-          releaseKind,
-        });
-        return { cancel: true };
+        return buildMessageSendingFollowup(
+          releaseKind === "final"
+            ? formatReleasePrompt(info, { state: nextGate, reason: verdict.reason })
+            : nextGate.pendingFinal || "",
+        );
       }
 
       if (gate.phase === "finalize") {
