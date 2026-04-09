@@ -1,6 +1,9 @@
 import type { Bot } from "grammy";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createTestPluginApi } from "../../../../test/helpers/plugins/plugin-api.js";
+import type { OpenClawPluginApi as SelfCheckPluginApi } from "../../../self-check-gate/api.js";
+import selfCheckGatePlugin from "../../../self-check-gate/index.js";
 
 const { loadWebMedia } = vi.hoisted(() => ({
   loadWebMedia: vi.fn(),
@@ -24,6 +27,9 @@ type DeliverWithParams = Omit<
 > &
   Partial<Pick<DeliverRepliesParams, "replyToMode" | "textLimit" | "mediaLoader">>;
 type RuntimeStub = Pick<RuntimeEnv, "error" | "log" | "exit">;
+type RegisteredCommand = {
+  handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
+};
 
 vi.mock("openclaw/plugin-sdk/web-media", () => ({
   loadWebMedia: (...args: unknown[]) => loadWebMedia(...args),
@@ -128,8 +134,83 @@ function createVoiceFailureHarness(params: {
   return { runtime, sendVoice, sendMessage, bot };
 }
 
+async function createSelfCheckGateHarness() {
+  const commands = new Map<string, RegisteredCommand>();
+  const hooks = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
+  const logger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+  };
+  let store: Record<string, unknown> = {};
+  const loadSessionStoreForPlugin = vi.fn(async () => store);
+  const saveSessionStoreForPlugin = vi.fn(
+    async (_path: string, nextStore: Record<string, unknown>) => {
+      store = { ...nextStore };
+    },
+  );
+  const resolveStorePathForPlugin = vi.fn(() => "/tmp/self-check-gate-store.json");
+  const resolveSessionFilePathForPlugin = vi.fn(
+    () => "/tmp/self-check-gate-session/agent-main-session-1.json",
+  );
+  const runEmbeddedPiAgent = vi.fn(async () => {});
+
+  const api = createTestPluginApi({
+    id: "self-check-gate",
+    name: "Self Check Gate",
+    source: "test",
+    config: {
+      agents: {
+        list: [{ id: "agent-main" }],
+      },
+      session: {
+        store: "/tmp/self-check-gate-session-store.json",
+      },
+    } as SelfCheckPluginApi["config"],
+    runtime: {
+      agent: {
+        session: {
+          resolveStorePath: resolveStorePathForPlugin,
+          loadSessionStore: loadSessionStoreForPlugin,
+          saveSessionStore: saveSessionStoreForPlugin,
+          resolveSessionFilePath: resolveSessionFilePathForPlugin,
+        },
+        runEmbeddedPiAgent,
+      },
+    } as unknown as SelfCheckPluginApi["runtime"],
+    logger,
+    registerCommand: (command) => {
+      commands.set(command.name, command as RegisteredCommand);
+    },
+    on: (hookName, handler) => {
+      hooks.set(hookName, handler as (event: unknown, ctx: unknown) => Promise<unknown>);
+    },
+  });
+
+  await selfCheckGatePlugin.register(api);
+
+  const selfCheckCommand = commands.get("selfcheck");
+  const messageSendingHook = hooks.get("message_sending");
+  if (!selfCheckCommand || !messageSendingHook) {
+    throw new Error("self-check-gate registration did not expose required command/hooks");
+  }
+
+  return {
+    logger,
+    loadSessionStoreForPlugin,
+    saveSessionStoreForPlugin,
+    resolveStorePathForPlugin,
+    resolveSessionFilePathForPlugin,
+    runEmbeddedPiAgent,
+    selfCheckCommand,
+    messageSendingHook,
+  };
+}
+
 describe("deliverReplies", () => {
   beforeEach(() => {
+    vi.useRealTimers();
     loadWebMedia.mockClear();
     triggerInternalHook.mockReset();
     messageHookRunner.hasHooks.mockReset();
@@ -220,6 +301,167 @@ describe("deliverReplies", () => {
         accountId: "work",
         conversationId: "123",
       }),
+    );
+  });
+
+  it("logs the normal Telegram deliverReplies path before sending", async () => {
+    const { runtime, sendMessage, bot } = createSendMessageHarness();
+
+    await deliverWith({
+      replies: [{ text: "hello" }],
+      runtime,
+      bot,
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: deliverReplies enter"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: deliverReplies transport=message kind=text"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "telegram-delivery-path: deliverReplies delivered kind=text success=true",
+      ),
+    );
+  });
+
+  it("runs the real self-check-gate message_sending hook on Telegram delivery after /selfcheck on", async () => {
+    vi.useFakeTimers();
+    const {
+      logger,
+      runEmbeddedPiAgent,
+      selfCheckCommand,
+      messageSendingHook,
+      loadSessionStoreForPlugin,
+      saveSessionStoreForPlugin,
+    } = await createSelfCheckGateHarness();
+    messageHookRunner.hasHooks.mockImplementation((name: string) => name === "message_sending");
+    messageHookRunner.runMessageSending.mockImplementation(async (event, ctx) => {
+      return await messageSendingHook(event, ctx);
+    });
+
+    const armResult = await selfCheckCommand.handler({
+      args: "on",
+      channel: "telegram",
+      channelId: "telegram",
+      commandBody: "/selfcheck on",
+      config: {},
+      isAuthorizedSender: true,
+      requestConversationBinding: async () => ({
+        status: "error",
+        message: "unsupported in this test",
+      }),
+      detachConversationBinding: async () => ({ removed: false }),
+      getCurrentConversationBinding: async () => null,
+      sessionKey: "agent-main:session-1",
+      sessionId: "session-1",
+      from: "telegram:123",
+      to: "telegram:123",
+      accountId: "default",
+      messageThreadId: "thread-1",
+    });
+
+    const runtime = createRuntime(false);
+    const sendMessage = vi.fn().mockResolvedValue({ message_id: 41, chat: { id: "123" } });
+    const bot = createBot({ sendMessage });
+
+    await deliverWith({
+      accountId: "default",
+      replies: [{ text: armResult.text }],
+      runtime,
+      bot,
+    });
+
+    await deliverWith({
+      accountId: "default",
+      replies: [{ text: "final answer" }],
+      runtime,
+      bot,
+    });
+
+    expect(messageHookRunner.runMessageSending).toHaveBeenCalledTimes(2);
+    expect(messageHookRunner.runMessageSending).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        to: "123",
+        content: armResult.text,
+        metadata: expect.objectContaining({
+          channel: "telegram",
+        }),
+      }),
+      expect.objectContaining({
+        channelId: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      }),
+    );
+    expect(messageHookRunner.runMessageSending).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        to: "123",
+        content: "final answer",
+        metadata: expect.objectContaining({
+          channel: "telegram",
+        }),
+      }),
+      expect.objectContaining({
+        channelId: "telegram",
+        accountId: "default",
+        conversationId: "123",
+      }),
+    );
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith("123", expect.any(String), expect.any(Object));
+    expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
+    expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "session-1",
+        sessionKey: "agent-main:session-1",
+        agentId: "agent-main",
+        messageChannel: "telegram",
+        agentAccountId: "default",
+        messageThreadId: "thread-1",
+        disableMessageTool: true,
+        prompt: expect.stringContaining("SELF_CHECK_MODE"),
+      }),
+    );
+    expect(loadSessionStoreForPlugin).toHaveBeenCalled();
+    expect(saveSessionStoreForPlugin).toHaveBeenCalled();
+    const latestSavedStore = saveSessionStoreForPlugin.mock.calls.at(-1)?.[1];
+    expect(latestSavedStore).toEqual(
+      expect.objectContaining({
+        "agent-main:session-1": expect.objectContaining({
+          selfCheckGate: expect.objectContaining({
+            armed: true,
+            phase: "self_check",
+            pendingFinal: "final answer",
+          }),
+        }),
+      }),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending enter"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending candidate_final"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending phase_transition"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "self-check-gate: message_sending cancel reason=self_check_scheduled",
+      ),
     );
   });
 

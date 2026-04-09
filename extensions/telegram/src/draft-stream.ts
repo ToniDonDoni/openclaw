@@ -221,6 +221,9 @@ export function createTelegramDraftStream(params: {
     sendGeneration,
   }: PreviewSendParams): Promise<boolean> => {
     if (typeof streamMessageId === "number") {
+      params.log?.(
+        `telegram stream preview path transport=message op=edit messageId=${streamMessageId} textLength=${renderedText.length}`,
+      );
       if (renderedParseMode) {
         await params.api.editMessageText(chatId, streamMessageId, renderedText, {
           parse_mode: renderedParseMode,
@@ -231,6 +234,9 @@ export function createTelegramDraftStream(params: {
       return true;
     }
     messageSendAttempted = true;
+    params.log?.(
+      `telegram stream preview path transport=message op=send textLength=${renderedText.length}`,
+    );
     let sent: Awaited<ReturnType<typeof sendRenderedMessageWithThreadFallback>>["sent"];
     try {
       ({ sent } = await sendRenderedMessageWithThreadFallback({
@@ -272,6 +278,9 @@ export function createTelegramDraftStream(params: {
   }: PreviewSendParams): Promise<boolean> => {
     const draftId = streamDraftId ?? allocateTelegramDraftId();
     streamDraftId = draftId;
+    params.log?.(
+      `telegram stream preview path transport=draft op=send draftId=${draftId} textLength=${renderedText.length}`,
+    );
     const draftParams = {
       ...(threadParams?.message_thread_id != null
         ? { message_thread_id: threadParams.message_thread_id }
@@ -340,6 +349,7 @@ export function createTelegramDraftStream(params: {
           }
           previewTransport = "message";
           streamDraftId = undefined;
+          params.log?.("telegram stream preview path transport=draft op=fallback_to_message");
           params.warn?.(
             "telegram stream preview: sendMessageDraft rejected by API; falling back to sendMessage/editMessageText",
           );
@@ -400,6 +410,9 @@ export function createTelegramDraftStream(params: {
     }
     lastSentText = "";
     lastSentParseMode = undefined;
+    params.log?.(
+      `telegram stream preview path transport=${previewTransport} op=force_new_message generation=${generation}`,
+    );
     loop.resetPending();
     loop.resetThrottleWindow();
   };
@@ -414,6 +427,9 @@ export function createTelegramDraftStream(params: {
     await stop();
     // If using message transport, the streamMessageId is already a real message.
     if (previewTransport === "message" && typeof streamMessageId === "number") {
+      params.log?.(
+        `telegram stream preview path transport=message op=materialize messageId=${streamMessageId}`,
+      );
       return streamMessageId;
     }
     // For draft transport, use the rendered snapshot first so parse_mode stays
@@ -424,6 +440,9 @@ export function createTelegramDraftStream(params: {
     }
     const renderedParseMode = lastSentText ? lastSentParseMode : undefined;
     try {
+      params.log?.(
+        `telegram stream preview path transport=draft op=materialize textLength=${renderedText.length}`,
+      );
       const { sent, usedThreadParams } = await sendRenderedMessageWithThreadFallback({
         renderedText,
         renderedParseMode,
@@ -455,7 +474,9 @@ export function createTelegramDraftStream(params: {
     return undefined;
   };
 
-  params.log?.(`telegram stream preview ready (maxChars=${maxChars}, throttleMs=${throttleMs})`);
+  params.log?.(
+    `telegram stream preview ready (requestedTransport=${requestedPreviewTransport}, transport=${previewTransport}, maxChars=${maxChars}, throttleMs=${throttleMs})`,
+  );
 
   return {
     update,

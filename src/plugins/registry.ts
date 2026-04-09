@@ -1176,6 +1176,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
   };
 
   const normalizeLogger = (logger: PluginLogger): PluginLogger => ({
+    trace: logger.trace,
     info: logger.info,
     warn: logger.warn,
     error: logger.error,

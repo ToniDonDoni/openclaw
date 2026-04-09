@@ -1,6 +1,7 @@
 import type { PluginLogger } from "./types.js";
 
 type LoggerLike = {
+  trace?: (message: string) => void;
   info: (message: string) => void;
   warn: (message: string) => void;
   error: (message: string) => void;
@@ -9,6 +10,7 @@ type LoggerLike = {
 
 export function createPluginLoaderLogger(logger: LoggerLike): PluginLogger {
   return {
+    trace: (msg) => logger.trace?.(msg),
     info: (msg) => logger.info(msg),
     warn: (msg) => logger.warn(msg),
     error: (msg) => logger.error(msg),

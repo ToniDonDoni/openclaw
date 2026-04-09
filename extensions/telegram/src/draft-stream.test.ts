@@ -161,6 +161,28 @@ describe("createTelegramDraftStream", () => {
     expect(api.sendMessageDraft).not.toHaveBeenCalled();
   });
 
+  it("logs message preview transport operations", async () => {
+    const api = createMockDraftApi();
+    const log = vi.fn();
+    const stream = createDraftStream(api, {
+      thread: { id: 42, scope: "dm" },
+      previewTransport: "message",
+      log,
+    });
+
+    stream.update("Hello");
+    await stream.flush();
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "telegram stream preview ready (requestedTransport=message, transport=message",
+      ),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram stream preview path transport=message op=send"),
+    );
+  });
+
   it("falls back to message transport when sendMessageDraft is unavailable", async () => {
     const api = createMockDraftApi();
     delete (api as { sendMessageDraft?: unknown }).sendMessageDraft;
@@ -194,6 +216,32 @@ describe("createTelegramDraftStream", () => {
     await stream.flush();
 
     expect(api.editMessageText).toHaveBeenCalledWith(123, 17, "Hello again");
+  });
+
+  it("logs draft preview transport operations", async () => {
+    const api = createMockDraftApi();
+    const log = vi.fn();
+    const stream = createDraftStream(api, {
+      thread: { id: 42, scope: "dm" },
+      previewTransport: "draft",
+      log,
+    });
+
+    stream.update("Hello");
+    await stream.flush();
+    await stream.materialize?.();
+
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "telegram stream preview ready (requestedTransport=draft, transport=draft",
+      ),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram stream preview path transport=draft op=send"),
+    );
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram stream preview path transport=draft op=materialize"),
+    );
   });
 
   it("retries DM message preview send without thread when thread is not found", async () => {

@@ -57,6 +57,10 @@ type TelegramReplyChannelData = {
 
 type ChunkTextFn = (markdown: string) => ReturnType<typeof markdownToTelegramChunks>;
 
+function logTelegramDeliveryPath(runtime: RuntimeEnv, message: string): void {
+  runtime.log(`telegram-delivery-path: ${message}`);
+}
+
 function buildChunkTextResolver(params: {
   textLimit: number;
   chunkMode: ChunkMode;
@@ -615,6 +619,12 @@ export async function deliverReplies(params: {
   const hookRunner = getGlobalHookRunner();
   const hasMessageSendingHooks = hookRunner?.hasHooks("message_sending") ?? false;
   const hasMessageSentHooks = hookRunner?.hasHooks("message_sent") ?? false;
+  logTelegramDeliveryPath(
+    params.runtime,
+    `deliverReplies enter chatId=${params.chatId} replies=${params.replies.length} threadId=${
+      params.thread?.id ?? "none"
+    } messageSendingHooks=${hasMessageSendingHooks ? "on" : "off"}`,
+  );
   const chunkText = buildChunkTextResolver({
     textLimit: params.textLimit,
     chunkMode: params.chunkMode ?? "length",
@@ -639,6 +649,10 @@ export async function deliverReplies(params: {
 
     const rawContent = reply.text || "";
     if (hasMessageSendingHooks) {
+      logTelegramDeliveryPath(
+        params.runtime,
+        `deliverReplies hook=message_sending chatId=${params.chatId} contentLength=${rawContent.length} mediaCount=${mediaList.length}`,
+      );
       const hookResult = await hookRunner?.runMessageSending(
         {
           to: params.chatId,
@@ -656,6 +670,10 @@ export async function deliverReplies(params: {
         },
       );
       if (hookResult?.cancel) {
+        logTelegramDeliveryPath(
+          params.runtime,
+          `deliverReplies canceled_by_hook chatId=${params.chatId} contentLength=${rawContent.length}`,
+        );
         continue;
       }
       if (typeof hookResult?.content === "string" && hookResult.content !== rawContent) {
@@ -673,6 +691,12 @@ export async function deliverReplies(params: {
       const shouldPinFirstMessage = telegramData?.pin === true;
       const replyMarkup = buildInlineKeyboard(telegramData?.buttons);
       let firstDeliveredMessageId: number | undefined;
+      logTelegramDeliveryPath(
+        params.runtime,
+        `deliverReplies transport=message kind=${mediaList.length === 0 ? "text" : "media"} chatId=${params.chatId} threadId=${
+          params.thread?.id ?? "none"
+        }`,
+      );
       if (mediaList.length === 0) {
         firstDeliveredMessageId = await deliverTextReply({
           bot: params.bot,
@@ -711,6 +735,12 @@ export async function deliverReplies(params: {
           progress,
         });
       }
+      logTelegramDeliveryPath(
+        params.runtime,
+        `deliverReplies delivered kind=${mediaList.length === 0 ? "text" : "media"} success=${
+          progress.deliveredCount > deliveredCountBeforeReply ? "true" : "false"
+        } messageId=${firstDeliveredMessageId ?? "none"}`,
+      );
       await maybePinFirstDeliveredMessage({
         shouldPin: shouldPinFirstMessage,
         bot: params.bot,

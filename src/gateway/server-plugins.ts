@@ -386,6 +386,7 @@ export function loadGatewayPlugins(params: {
   autoEnabledReasons?: Readonly<Record<string, string[]>>;
   workspaceDir: string;
   log: {
+    trace?: (msg: string) => void;
     info: (msg: string) => void;
     warn: (msg: string) => void;
     error: (msg: string) => void;
@@ -445,6 +446,7 @@ export function loadGatewayPlugins(params: {
     workspaceDir: params.workspaceDir,
     onlyPluginIds: pluginIds,
     logger: {
+      trace: (msg) => params.log.trace?.(msg) ?? params.log.debug(msg),
       info: (msg) => params.log.info(msg),
       warn: (msg) => params.log.warn(msg),
       error: (msg) => params.log.error(msg),

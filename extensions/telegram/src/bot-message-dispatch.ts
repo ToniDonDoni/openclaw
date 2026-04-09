@@ -13,6 +13,7 @@ import type {
   TelegramDirectConfig,
 } from "openclaw/plugin-sdk/config-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import { getGlobalHookRunner } from "openclaw/plugin-sdk/plugin-runtime";
 import { clearHistoryEntriesIfEnabled } from "openclaw/plugin-sdk/reply-history";
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import type { ReplyPayload } from "openclaw/plugin-sdk/reply-runtime";
@@ -69,6 +70,68 @@ const EMPTY_RESPONSE_FALLBACK = "No response generated. Please try again.";
 
 /** Minimum chars before sending first streaming message (improves push notification UX) */
 const DRAFT_MIN_INITIAL_CHARS = 30;
+
+function logTelegramDeliveryPath(runtime: RuntimeEnv, message: string): void {
+  runtime.log(`telegram-delivery-path: ${message}`);
+}
+
+async function runTelegramPreviewFinalMessageHook(params: {
+  runtime: RuntimeEnv;
+  chatId: number;
+  accountId?: string;
+  threadId?: number;
+  content: string;
+  messageId?: number;
+  bot: Bot;
+}): Promise<{ cancel: boolean }> {
+  const hookRunner = getGlobalHookRunner();
+  if (!hookRunner?.hasHooks("message_sending")) {
+    return { cancel: false };
+  }
+  logTelegramDeliveryPath(
+    params.runtime,
+    `preview-final-hook enter chatId=${params.chatId} messageId=${params.messageId ?? "none"} contentLength=${params.content.length}`,
+  );
+  const hookResult = await hookRunner.runMessageSending(
+    {
+      to: String(params.chatId),
+      content: params.content,
+      metadata: {
+        channel: "telegram",
+        ...(typeof params.threadId === "number" ? { threadId: params.threadId } : {}),
+      },
+    },
+    {
+      channelId: "telegram",
+      accountId: params.accountId,
+      conversationId: String(params.chatId),
+    },
+  );
+  if (!hookResult?.cancel) {
+    logTelegramDeliveryPath(
+      params.runtime,
+      `preview-final-hook allow chatId=${params.chatId} messageId=${params.messageId ?? "none"}`,
+    );
+    return { cancel: false };
+  }
+  logTelegramDeliveryPath(
+    params.runtime,
+    `preview-final-hook cancel chatId=${params.chatId} messageId=${params.messageId ?? "none"}`,
+  );
+  if (typeof params.messageId === "number") {
+    await params.bot.api.deleteMessage(params.chatId, params.messageId);
+    logTelegramDeliveryPath(
+      params.runtime,
+      `preview-final-hook retracted_preview chatId=${params.chatId} messageId=${params.messageId}`,
+    );
+  } else {
+    logTelegramDeliveryPath(
+      params.runtime,
+      `preview-final-hook missing_message_id_for_retract chatId=${params.chatId}`,
+    );
+  }
+  return { cancel: true };
+}
 
 async function resolveStickerVisionSupport(cfg: OpenClawConfig, agentId: string) {
   try {
@@ -221,6 +284,14 @@ export const dispatchTelegramMessage = async ({
   // require a draft->message materialize hop, and that overlap keeps reintroducing
   // a visible duplicate flash at finalize time.
   const useMessagePreviewTransportForDm = threadSpec?.scope === "dm" && canStreamAnswerDraft;
+  logTelegramDeliveryPath(
+    runtime,
+    `dispatchTelegramMessage enter chatId=${chatId} streamMode=${streamMode} threadScope=${
+      threadSpec?.scope ?? "none"
+    } answerDraft=${canStreamAnswerDraft ? "on" : "off"} reasoningDraft=${
+      canStreamReasoningDraft ? "on" : "off"
+    } dmPreviewTransport=${useMessagePreviewTransportForDm ? "message" : "default"}`,
+  );
   const mediaLocalRoots = getAgentScopedMediaLocalRoots(cfg, route.agentId);
   const archivedAnswerPreviews: ArchivedPreview[] = [];
   const archivedReasoningPreviewIds: number[] = [];
@@ -251,8 +322,12 @@ export const dispatchTelegramMessage = async ({
                   });
                 }
               : undefined,
-          log: logVerbose,
-          warn: logVerbose,
+          log: (message) => {
+            logTelegramDeliveryPath(runtime, `draft-stream lane=${laneName} ${message}`);
+          },
+          warn: (message) => {
+            logTelegramDeliveryPath(runtime, `draft-stream lane=${laneName} ${message}`);
+          },
         })
       : undefined;
     return {
@@ -489,6 +564,12 @@ export const dispatchTelegramMessage = async ({
     return { ...payload, text };
   };
   const sendPayload = async (payload: ReplyPayload) => {
+    logTelegramDeliveryPath(
+      runtime,
+      `sendPayload path=deliverReplies kind=${
+        payload.mediaUrls?.length || payload.mediaUrl ? "media" : "text"
+      } textLength=${payload.text?.length ?? 0} isError=${payload.isError === true ? "true" : "false"}`,
+    );
     const result = await (telegramDeps.deliverReplies ?? deliverReplies)({
       ...deliveryBaseOptions,
       replies: [payload],
@@ -505,6 +586,10 @@ export const dispatchTelegramMessage = async ({
     if (result.kind !== "preview-finalized") {
       return;
     }
+    logTelegramDeliveryPath(
+      runtime,
+      `preview-finalized messageId=${result.delivery.messageId} contentLength=${result.delivery.content.length}`,
+    );
     (telegramDeps.emitInternalMessageSentHook ?? emitInternalMessageSentHook)({
       sessionKeyForInternalHooks: deliveryBaseOptions.sessionKeyForInternalHooks,
       chatId: deliveryBaseOptions.chatId,
@@ -529,6 +614,10 @@ export const dispatchTelegramMessage = async ({
       await lane.stream?.stop();
     },
     editPreview: async ({ messageId, text, previewButtons }) => {
+      logTelegramDeliveryPath(
+        runtime,
+        `preview-edit messageId=${messageId} textLength=${text.length} hasButtons=${previewButtons ? "true" : "false"}`,
+      );
       await (telegramDeps.editMessageTelegram ?? editMessageTelegram)(chatId, messageId, text, {
         api: bot.api,
         cfg,
@@ -605,6 +694,12 @@ export const dispatchTelegramMessage = async ({
       dispatcherOptions: {
         ...replyPipeline,
         deliver: async (payload, info) => {
+          logTelegramDeliveryPath(
+            runtime,
+            `dispatcher deliver kind=${info.kind} textLength=${payload.text?.length ?? 0} hasMedia=${
+              payload.mediaUrls?.length || payload.mediaUrl ? "true" : "false"
+            }`,
+          );
           if (payload.isError === true) {
             hadErrorReplyFailureOrSkip = true;
           }
@@ -674,6 +769,29 @@ export const dispatchTelegramMessage = async ({
               previewButtons,
               allowPreviewUpdateForNonFinal: segment.lane === "reasoning",
             });
+            if (info.kind === "final" && segment.lane === "answer") {
+              const previewMessageId =
+                result.kind === "preview-finalized"
+                  ? (result.delivery.messageId ?? answerLane.stream?.messageId())
+                  : result.kind === "preview-retained"
+                    ? answerLane.stream?.messageId()
+                    : undefined;
+              if (result.kind === "preview-finalized" || result.kind === "preview-retained") {
+                const finalHookResult = await runTelegramPreviewFinalMessageHook({
+                  runtime,
+                  chatId,
+                  accountId: route.accountId,
+                  threadId: threadSpec.id,
+                  content:
+                    result.kind === "preview-finalized" ? result.delivery.content : segment.text,
+                  messageId: previewMessageId,
+                  bot,
+                });
+                if (finalHookResult.cancel) {
+                  continue;
+                }
+              }
+            }
             if (info.kind === "final") {
               emitPreviewFinalizedHook(result);
             }

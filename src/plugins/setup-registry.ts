@@ -59,6 +59,7 @@ type SetupAutoEnableReason = {
 
 const EMPTY_RUNTIME = {} as PluginRuntime;
 const NOOP_LOGGER: PluginLogger = {
+  trace() {},
   info() {},
   warn() {},
   error() {},

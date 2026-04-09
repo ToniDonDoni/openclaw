@@ -7,6 +7,7 @@ import type { OpenClawPluginServiceContext, PluginLogger } from "./types.js";
 const log = createSubsystemLogger("plugins");
 function createPluginLogger(): PluginLogger {
   return {
+    trace: (msg) => log.trace(msg),
     info: (msg) => log.info(msg),
     warn: (msg) => log.warn(msg),
     error: (msg) => log.error(msg),

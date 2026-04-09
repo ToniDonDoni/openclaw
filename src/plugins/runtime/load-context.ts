@@ -33,6 +33,7 @@ export type PluginRuntimeLoadContextOptions = {
 
 export function createPluginRuntimeLoaderLogger(): PluginLogger {
   return {
+    trace: (message) => log.trace(message),
     info: (message) => log.info(message),
     warn: (message) => log.warn(message),
     error: (message) => log.error(message),

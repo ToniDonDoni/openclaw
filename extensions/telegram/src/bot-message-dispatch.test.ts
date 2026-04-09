@@ -4,6 +4,9 @@ import { resolveChunkMode as resolveChunkModeRuntime } from "../../../src/auto-r
 import { resolveMarkdownTableMode as resolveMarkdownTableModeRuntime } from "../../../src/config/markdown-tables.js";
 import { resolveSessionStoreEntry as resolveSessionStoreEntryRuntime } from "../../../src/config/sessions/store.js";
 import { getAgentScopedMediaLocalRoots as getAgentScopedMediaLocalRootsRuntime } from "../../../src/media/local-roots.js";
+import { createTestPluginApi } from "../../../test/helpers/plugins/plugin-api.js";
+import type { OpenClawPluginApi as SelfCheckPluginApi } from "../../self-check-gate/api.js";
+import selfCheckGatePlugin from "../../self-check-gate/index.js";
 import { resolveAutoTopicLabelConfig as resolveAutoTopicLabelConfigRuntime } from "./auto-topic-label.js";
 import type { TelegramBotDeps } from "./bot-deps.js";
 import {
@@ -14,6 +17,9 @@ import {
 type DispatchReplyWithBufferedBlockDispatcherArgs = Parameters<
   TelegramBotDeps["dispatchReplyWithBufferedBlockDispatcher"]
 >[0];
+type RegisteredCommand = {
+  handler: (ctx: Record<string, unknown>) => Promise<{ text?: string }>;
+};
 
 const createTelegramDraftStream = vi.hoisted(() => vi.fn());
 const dispatchReplyWithBufferedBlockDispatcher = vi.hoisted(() =>
@@ -25,6 +31,7 @@ const createForumTopicTelegram = vi.hoisted(() => vi.fn());
 const deleteMessageTelegram = vi.hoisted(() => vi.fn());
 const editForumTopicTelegram = vi.hoisted(() => vi.fn());
 const editMessageTelegram = vi.hoisted(() => vi.fn());
+const getGlobalHookRunner = vi.hoisted(() => vi.fn());
 const reactMessageTelegram = vi.hoisted(() => vi.fn());
 const sendMessageTelegram = vi.hoisted(() => vi.fn());
 const sendPollTelegram = vi.hoisted(() => vi.fn());
@@ -62,6 +69,16 @@ const generateTopicLabel = vi.hoisted(() => vi.fn());
 vi.mock("./draft-stream.js", () => ({
   createTelegramDraftStream,
 }));
+
+vi.mock("openclaw/plugin-sdk/plugin-runtime", async () => {
+  const actual = await vi.importActual<typeof import("openclaw/plugin-sdk/plugin-runtime")>(
+    "openclaw/plugin-sdk/plugin-runtime",
+  );
+  return {
+    ...actual,
+    getGlobalHookRunner,
+  };
+});
 
 vi.mock("./bot/delivery.js", () => ({
   deliverReplies,
@@ -139,6 +156,7 @@ describe("dispatchTelegramMessage draft streaming", () => {
   });
 
   beforeEach(() => {
+    vi.useRealTimers();
     createTelegramDraftStream.mockReset();
     dispatchReplyWithBufferedBlockDispatcher.mockReset();
     deliverReplies.mockReset();
@@ -147,6 +165,8 @@ describe("dispatchTelegramMessage draft streaming", () => {
     deleteMessageTelegram.mockReset();
     editForumTopicTelegram.mockReset();
     editMessageTelegram.mockReset();
+    getGlobalHookRunner.mockReset();
+    getGlobalHookRunner.mockReturnValue(null);
     reactMessageTelegram.mockReset();
     sendMessageTelegram.mockReset();
     sendPollTelegram.mockReset();
@@ -274,6 +294,76 @@ describe("dispatchTelegramMessage draft streaming", () => {
     } as unknown as Bot;
   }
 
+  async function createSelfCheckGateHarness() {
+    const commands = new Map<string, RegisteredCommand>();
+    const hooks = new Map<string, (event: unknown, ctx: unknown) => Promise<unknown>>();
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      debug: vi.fn(),
+    };
+    let store: Record<string, unknown> = {};
+    const loadSessionStoreForPlugin = vi.fn(async () => store);
+    const saveSessionStoreForPlugin = vi.fn(
+      async (_path: string, nextStore: Record<string, unknown>) => {
+        store = { ...nextStore };
+      },
+    );
+    const resolveStorePathForPlugin = vi.fn(() => "/tmp/self-check-gate-store.json");
+    const resolveSessionFilePathForPlugin = vi.fn(
+      () => "/tmp/self-check-gate-session/agent-main-session-1.json",
+    );
+    const runEmbeddedPiAgent = vi.fn(async () => {});
+
+    const api = createTestPluginApi({
+      id: "self-check-gate",
+      name: "Self Check Gate",
+      source: "test",
+      config: {
+        agents: {
+          list: [{ id: "agent-main" }],
+        },
+        session: {
+          store: "/tmp/self-check-gate-session-store.json",
+        },
+      } as SelfCheckPluginApi["config"],
+      runtime: {
+        agent: {
+          session: {
+            resolveStorePath: resolveStorePathForPlugin,
+            loadSessionStore: loadSessionStoreForPlugin,
+            saveSessionStore: saveSessionStoreForPlugin,
+            resolveSessionFilePath: resolveSessionFilePathForPlugin,
+          },
+          runEmbeddedPiAgent,
+        },
+      } as unknown as SelfCheckPluginApi["runtime"],
+      logger,
+      registerCommand: (command) => {
+        commands.set(command.name, command as RegisteredCommand);
+      },
+      on: (hookName, handler) => {
+        hooks.set(hookName, handler as (event: unknown, ctx: unknown) => Promise<unknown>);
+      },
+    });
+
+    await selfCheckGatePlugin.register(api);
+
+    const selfCheckCommand = commands.get("selfcheck");
+    const messageSendingHook = hooks.get("message_sending");
+    if (!selfCheckCommand || !messageSendingHook) {
+      throw new Error("self-check-gate registration did not expose required command/hooks");
+    }
+
+    return {
+      logger,
+      runEmbeddedPiAgent,
+      selfCheckCommand,
+      messageSendingHook,
+    };
+  }
+
   function createRuntime(): Parameters<typeof dispatchTelegramMessage>[0]["runtime"] {
     return {
       log: vi.fn(),
@@ -291,13 +381,14 @@ describe("dispatchTelegramMessage draft streaming", () => {
     streamMode?: Parameters<typeof dispatchTelegramMessage>[0]["streamMode"];
     telegramDeps?: TelegramBotDeps;
     bot?: Bot;
+    runtime?: Parameters<typeof dispatchTelegramMessage>[0]["runtime"];
   }) {
     const bot = params.bot ?? createBot();
     await dispatchTelegramMessage({
       context: params.context,
       bot,
       cfg: params.cfg ?? {},
-      runtime: createRuntime(),
+      runtime: params.runtime ?? createRuntime(),
       replyToMode: "first",
       streamMode: params.streamMode ?? "partial",
       textLimit: 4096,
@@ -626,11 +717,13 @@ describe("dispatchTelegramMessage draft streaming", () => {
       await dispatcherOptions.deliver({ text: "Primary result" }, { kind: "final" });
       return { queuedFinal: true };
     });
+    const runtime = createRuntime();
 
     await dispatchWithContext({
       context: createContext({
         ctxPayload: { SessionKey: "s1" } as unknown as TelegramMessageContext["ctxPayload"],
       }),
+      runtime,
     });
 
     expect(deliverReplies).not.toHaveBeenCalled();
@@ -648,6 +741,109 @@ describe("dispatchTelegramMessage draft streaming", () => {
         success: true,
         messageId: 999,
       }),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: preview-finalized messageId=999"),
+    );
+  });
+
+  it("runs self-check-gate on preview finalization and retracts the preview when canceled", async () => {
+    vi.useFakeTimers();
+    const { logger, runEmbeddedPiAgent, selfCheckCommand, messageSendingHook } =
+      await createSelfCheckGateHarness();
+    getGlobalHookRunner.mockReturnValue({
+      hasHooks: (name: string) => name === "message_sending",
+      runMessageSending: (event: unknown, ctx: unknown) => messageSendingHook(event, ctx),
+    });
+    const armResult = await selfCheckCommand.handler({
+      args: "on",
+      channel: "telegram",
+      channelId: "telegram",
+      commandBody: "/selfcheck on",
+      config: {},
+      isAuthorizedSender: true,
+      requestConversationBinding: async () => ({
+        status: "error",
+        message: "unsupported in this test",
+      }),
+      detachConversationBinding: async () => ({ removed: false }),
+      getCurrentConversationBinding: async () => null,
+      sessionKey: "agent-main:session-1",
+      sessionId: "session-1",
+      from: "telegram:123",
+      to: "telegram:123",
+      accountId: "default",
+      messageThreadId: "thread-1",
+    });
+    expect(armResult.text).toContain("Self-check gate enabled");
+
+    const draftStream = createSequencedDraftStream(1001);
+    createTelegramDraftStream.mockReturnValue(draftStream);
+    dispatchReplyWithBufferedBlockDispatcher.mockImplementation(
+      async ({ dispatcherOptions, replyOptions }) => {
+        await replyOptions?.onPartialReply?.({ text: "preview text the user can see" });
+        await dispatcherOptions.deliver(
+          { text: "final answer that should trigger self-check" },
+          { kind: "final" },
+        );
+        return { queuedFinal: true };
+      },
+    );
+
+    const bot = createBot();
+    const runtime = createRuntime();
+    await dispatchWithContext({
+      context: createContext({
+        ctxPayload: { SessionKey: "agent-main:session-1" } as TelegramMessageContext["ctxPayload"],
+      }),
+      bot,
+      runtime,
+    });
+
+    expect(editMessageTelegram).toHaveBeenCalledWith(
+      123,
+      1001,
+      "final answer that should trigger self-check",
+      expect.any(Object),
+    );
+    expect(bot.api.deleteMessage).toHaveBeenCalledWith(123, 1001);
+    expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
+    expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "session-1",
+        sessionKey: "agent-main:session-1",
+        agentId: "agent-main",
+        messageChannel: "telegram",
+        agentAccountId: "default",
+        messageThreadId: "thread-1",
+        disableMessageTool: true,
+        prompt: expect.stringContaining("SELF_CHECK_MODE"),
+      }),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: preview-final-hook enter"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: preview-final-hook cancel"),
+    );
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-delivery-path: preview-final-hook retracted_preview"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending phase_transition"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "self-check-gate: message_sending cancel reason=self_check_scheduled",
+      ),
     );
   });
 
