@@ -747,10 +747,24 @@ describe("dispatchTelegramMessage draft streaming", () => {
     );
   });
 
-  it("runs self-check-gate on preview finalization and retracts the preview when canceled", async () => {
+  it("keeps the preview when inline self-check returns wait_external", async () => {
     vi.useFakeTimers();
     const { logger, runEmbeddedPiAgent, selfCheckCommand, messageSendingHook } =
       await createSelfCheckGateHarness();
+    runEmbeddedPiAgent.mockResolvedValueOnce({
+      payloads: [
+        {
+          text: JSON.stringify({
+            state: "wait_external",
+            progressHash: "hash-wait",
+            reason: "remote checks still pending",
+            nextAction: null,
+            blockers: [],
+          }),
+        },
+      ],
+      meta: {},
+    });
     getGlobalHookRunner.mockReturnValue({
       hasHooks: (name: string) => name === "message_sending",
       runMessageSending: (event: unknown, ctx: unknown) => messageSendingHook(event, ctx),
@@ -792,13 +806,15 @@ describe("dispatchTelegramMessage draft streaming", () => {
 
     const bot = createBot();
     const runtime = createRuntime();
-    await dispatchWithContext({
+    const dispatchPromise = dispatchWithContext({
       context: createContext({
         ctxPayload: { SessionKey: "agent-main:session-1" } as TelegramMessageContext["ctxPayload"],
       }),
       bot,
       runtime,
     });
+    await vi.advanceTimersByTimeAsync(1000);
+    await dispatchPromise;
 
     expect(editMessageTelegram).toHaveBeenCalledWith(
       123,
@@ -806,9 +822,7 @@ describe("dispatchTelegramMessage draft streaming", () => {
       "final answer that should trigger self-check",
       expect.any(Object),
     );
-    expect(bot.api.deleteMessage).toHaveBeenCalledWith(123, 1001);
-    expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1000);
+    expect(bot.api.deleteMessage).not.toHaveBeenCalled();
     expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
     expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -826,24 +840,28 @@ describe("dispatchTelegramMessage draft streaming", () => {
       expect.stringContaining("telegram-delivery-path: preview-final-hook enter"),
     );
     expect(runtime.log).toHaveBeenCalledWith(
-      expect.stringContaining("telegram-delivery-path: preview-final-hook cancel"),
-    );
-    expect(runtime.log).toHaveBeenCalledWith(
-      expect.stringContaining("telegram-delivery-path: preview-final-hook retracted_preview"),
+      expect.stringContaining("telegram-delivery-path: preview-final-hook allow"),
     );
     expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining("self-check-gate: message_sending phase_transition"),
     );
     expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining(
-        "self-check-gate: message_sending cancel reason=self_check_scheduled",
+        "self-check-gate: message_sending schedule_followup kind=self_check mode=inline",
       ),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: runInlineFollowupTurn delayed_launch"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending verdict_parsed"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending release_final"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining("verdictState=wait_external"));
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("message_sending allow reason=inline_self_check_released"),
     );
   });
 

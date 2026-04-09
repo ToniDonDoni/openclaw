@@ -337,6 +337,20 @@ describe("deliverReplies", () => {
       loadSessionStoreForPlugin,
       saveSessionStoreForPlugin,
     } = await createSelfCheckGateHarness();
+    runEmbeddedPiAgent.mockResolvedValueOnce({
+      payloads: [
+        {
+          text: JSON.stringify({
+            state: "done",
+            progressHash: "hash-done",
+            reason: "ready",
+            nextAction: null,
+            blockers: [],
+          }),
+        },
+      ],
+      meta: {},
+    });
     messageHookRunner.hasHooks.mockImplementation((name: string) => name === "message_sending");
     messageHookRunner.runMessageSending.mockImplementation(async (event, ctx) => {
       return await messageSendingHook(event, ctx);
@@ -374,12 +388,14 @@ describe("deliverReplies", () => {
       bot,
     });
 
-    await deliverWith({
+    const finalDeliverPromise = deliverWith({
       accountId: "default",
       replies: [{ text: "final answer" }],
       runtime,
       bot,
     });
+    await vi.advanceTimersByTimeAsync(1000);
+    await finalDeliverPromise;
 
     expect(messageHookRunner.runMessageSending).toHaveBeenCalledTimes(2);
     expect(messageHookRunner.runMessageSending).toHaveBeenNthCalledWith(
@@ -412,10 +428,8 @@ describe("deliverReplies", () => {
         conversationId: "123",
       }),
     );
-    expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage).toHaveBeenCalledWith("123", expect.any(String), expect.any(Object));
-    expect(runEmbeddedPiAgent).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(1000);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenNthCalledWith(2, "123", expect.any(String), expect.any(Object));
     expect(runEmbeddedPiAgent).toHaveBeenCalledTimes(1);
     expect(runEmbeddedPiAgent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -437,8 +451,10 @@ describe("deliverReplies", () => {
         "agent-main:session-1": expect.objectContaining({
           selfCheckGate: expect.objectContaining({
             armed: true,
-            phase: "self_check",
-            pendingFinal: "final answer",
+            phase: "work",
+            attempts: 0,
+            sameHashCount: 0,
+            lastVerdict: "done",
           }),
         }),
       }),
@@ -453,15 +469,21 @@ describe("deliverReplies", () => {
       expect.stringContaining("self-check-gate: message_sending phase_transition"),
     );
     expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: message_sending schedule_followup kind=self_check"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.stringContaining("self-check-gate: scheduleSelfCheckFollowup delayed_launch"),
-    );
-    expect(logger.info).toHaveBeenCalledWith(
       expect.stringContaining(
-        "self-check-gate: message_sending cancel reason=self_check_scheduled",
+        "self-check-gate: message_sending schedule_followup kind=self_check mode=inline",
       ),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: runInlineFollowupTurn delayed_launch"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending verdict_parsed"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("self-check-gate: message_sending release_final"),
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("message_sending allow reason=inline_self_check_released"),
     );
   });
 

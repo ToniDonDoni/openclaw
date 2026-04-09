@@ -69,10 +69,21 @@ type SessionRuntimeSelection = {
   authProfileIdSource?: "auto" | "user";
 };
 
+type EmbeddedPiRunResult = Awaited<
+  ReturnType<OpenClawPluginApi["runtime"]["agent"]["runEmbeddedPiAgent"]>
+>;
+
+type SelfCheckInlineDecision =
+  | { kind: "allow" }
+  | { kind: "replace"; content: string }
+  | { kind: "cancel"; reason: string };
+
 const TELEGRAM_CHANNEL_ID = "telegram";
 const MAX_ATTEMPTS = 6;
+const MAX_CONTINUE_ITERATIONS = 3;
 const MAX_SAME_HASH = 2;
 const SELF_CHECK_FOLLOWUP_DELAY_MS = 1000;
+const SELF_CHECK_RUN_TIMEOUT_MS = 5 * 60 * 1000;
 type SelfCheckLogFn = (message: string, meta?: Record<string, unknown>) => void;
 
 function summarizeStoreKeys(store: SessionStore): string[] {
@@ -233,6 +244,61 @@ function waitForDelay(ms: number): Promise<void> {
   });
 }
 
+function extractVisibleTextFromRunResult(result: EmbeddedPiRunResult): string | null {
+  const segments: string[] = [];
+  for (const payload of result.payloads ?? []) {
+    if (payload.isError || payload.isReasoning) {
+      continue;
+    }
+    const text = normalizeText(payload.text);
+    if (!text) {
+      continue;
+    }
+    segments.push(text);
+  }
+  return segments.length > 0 ? segments.join("\n\n").trim() : null;
+}
+
+function buildResetGateState(lastVerdict?: SelfCheckVerdictState): SelfCheckGateState {
+  return {
+    armed: true,
+    phase: "work",
+    attempts: 0,
+    sameHashCount: 0,
+    ...(lastVerdict ? { lastVerdict } : {}),
+    updatedAtMs: Date.now(),
+  };
+}
+
+function resolveInlineDecision(params: {
+  canReplaceContent: boolean;
+  originalContent: string;
+  finalContent: string;
+  denyReason: string;
+}): SelfCheckInlineDecision {
+  if (params.finalContent === params.originalContent) {
+    return { kind: "allow" };
+  }
+  if (params.canReplaceContent) {
+    return { kind: "replace", content: params.finalContent };
+  }
+  return { kind: "cancel", reason: params.denyReason };
+}
+
+function supportsInlineContentReplacement(event: { metadata?: Record<string, unknown> }): boolean {
+  const metadata = event.metadata;
+  if (!metadata || typeof metadata !== "object") {
+    return true;
+  }
+  const channel = normalizeText(
+    typeof metadata.channel === "string" ? metadata.channel : undefined,
+  );
+  if (channel !== TELEGRAM_CHANNEL_ID) {
+    return true;
+  }
+  return Object.prototype.hasOwnProperty.call(metadata, "mediaUrls");
+}
+
 function formatStateLabel(state: SelfCheckVerdictState): string {
   switch (state) {
     case "done":
@@ -281,35 +347,6 @@ function formatSelfCheckPrompt(
     "Draft to evaluate:",
     params.pendingFinal?.trim() || "(empty)",
   ].join("\n");
-}
-
-function formatReleasePrompt(
-  info: SelfCheckLogFn,
-  params: { state: SelfCheckGateState; reason?: string },
-): string {
-  info("ENTER formatReleasePrompt", {
-    phase: params.state.phase,
-    releaseKind: params.state.releaseKind,
-    reason: params.reason,
-  });
-  const base =
-    params.state.releaseKind === "wait_external"
-      ? [
-          "SELF_CHECK_RELEASE_MODE",
-          "Emit a short user-facing wait status message.",
-          `Reason: ${params.reason?.trim() || "external dependency pending"}`,
-        ]
-      : params.state.releaseKind === "blocked_external"
-        ? [
-            "SELF_CHECK_RELEASE_MODE",
-            "Emit a short user-facing blocker message.",
-            `Reason: ${params.reason?.trim() || "external dependency blocked completion"}`,
-          ]
-        : ["SELF_CHECK_RELEASE_MODE", "Emit the approved final response verbatim."];
-  const pendingFinal = params.state.pendingFinal?.trim();
-  return pendingFinal
-    ? [...base, "", "Approved content:", pendingFinal].join("\n")
-    : base.join("\n");
 }
 
 function parseVerdict(text: string): SelfCheckVerdict | null {
@@ -412,6 +449,16 @@ async function saveSessionStore(
     keys: summarizeStoreKeys(store),
   });
   await api.runtime.agent.session.saveSessionStore(storePath, store as never);
+}
+
+async function persistBindingEntry(
+  info: SelfCheckLogFn,
+  api: OpenClawPluginApi,
+  binding: SessionBinding,
+): Promise<void> {
+  const store = await loadSessionStore(api, binding.storePath, info);
+  store[binding.sessionKey] = binding.entry;
+  await saveSessionStore(info, api, binding.storePath, store);
 }
 
 async function resolveTargetSessionBinding(
@@ -674,10 +721,11 @@ async function disarmCurrentSession(
   return `Self-check gate disabled for this session (${sessionKey}).`;
 }
 
-async function scheduleSelfCheckFollowup(
+async function runInlineFollowupTurn(
   info: SelfCheckLogFn,
   api: OpenClawPluginApi,
   params: {
+    kind: "self_check" | "continue";
     agentId: string;
     sessionId: string;
     sessionKey: string;
@@ -688,8 +736,9 @@ async function scheduleSelfCheckFollowup(
     delayMs?: number;
     runtimeSelection?: SessionRuntimeSelection;
   },
-): Promise<void> {
-  info("ENTER scheduleSelfCheckFollowup", {
+): Promise<EmbeddedPiRunResult> {
+  info("ENTER runInlineFollowupTurn", {
+    kind: params.kind,
     agentId: params.agentId,
     sessionId: params.sessionId,
     sessionKey: params.sessionKey,
@@ -717,8 +766,8 @@ async function scheduleSelfCheckFollowup(
     sessionFile: api.runtime.agent.session.resolveSessionFilePath(params.sessionId, undefined, {
       agentId: params.agentId,
     }),
-    timeoutMs: 30 * 60 * 1000,
-    runId: `self-check-gate:${params.sessionKey}:${Date.now()}`,
+    timeoutMs: SELF_CHECK_RUN_TIMEOUT_MS,
+    runId: `self-check-gate:${params.kind}:${params.sessionKey}:${Date.now()}`,
     disableTools: false,
     disableMessageTool: true,
     allowGatewaySubagentBinding: false,
@@ -731,40 +780,34 @@ async function scheduleSelfCheckFollowup(
       ? { authProfileIdSource: params.runtimeSelection.authProfileIdSource }
       : {}),
   };
-  const startFollowup = async () => {
-    info("scheduleSelfCheckFollowup start_run", {
-      sessionKey: params.sessionKey,
-      delayMs: params.delayMs ?? 0,
-      provider: params.runtimeSelection?.provider,
-      model: params.runtimeSelection?.model,
-      authProfileId: params.runtimeSelection?.authProfileId,
-      authProfileIdSource: params.runtimeSelection?.authProfileIdSource,
-    });
-    await api.runtime.agent.runEmbeddedPiAgent(runParams);
-  };
   if (typeof params.delayMs === "number" && params.delayMs > 0) {
-    info("scheduleSelfCheckFollowup delayed_launch", {
+    info("runInlineFollowupTurn delayed_launch", {
+      kind: params.kind,
       sessionKey: params.sessionKey,
       delayMs: params.delayMs,
     });
-    void waitForDelay(params.delayMs)
-      .then(startFollowup)
-      .catch((error: unknown) => {
-        const message =
-          error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
-        api.logger.warn(
-          `self-check-gate: scheduleSelfCheckFollowup failed sessionKey=${params.sessionKey} delayMs=${params.delayMs} error=${message}`,
-        );
-      });
-    return;
+    await waitForDelay(params.delayMs);
   }
-  void startFollowup().catch((error: unknown) => {
-    const message =
-      error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
-    api.logger.warn(
-      `self-check-gate: scheduleSelfCheckFollowup failed sessionKey=${params.sessionKey} error=${message}`,
-    );
+  info("runInlineFollowupTurn start_run", {
+    kind: params.kind,
+    sessionKey: params.sessionKey,
+    delayMs: params.delayMs ?? 0,
+    provider: params.runtimeSelection?.provider,
+    model: params.runtimeSelection?.model,
+    authProfileId: params.runtimeSelection?.authProfileId,
+    authProfileIdSource: params.runtimeSelection?.authProfileIdSource,
   });
+  const result = await api.runtime.agent.runEmbeddedPiAgent(runParams);
+  info("runInlineFollowupTurn complete", {
+    kind: params.kind,
+    sessionKey: params.sessionKey,
+    payloadCount: result.payloads?.length ?? 0,
+    visibleTextLength: extractVisibleTextFromRunResult(result)?.length ?? 0,
+    aborted: result.meta?.aborted === true,
+    didSendViaMessagingTool: result.didSendViaMessagingTool === true,
+    stopReason: result.meta?.stopReason,
+  });
+  return result;
 }
 
 function buildContinuePrompt(verdict: SelfCheckVerdict, gate: SelfCheckGateState): string {
@@ -794,6 +837,269 @@ function buildStopPrompt(verdict: SelfCheckVerdict, gate: SelfCheckGateState): s
   ]
     .filter(Boolean)
     .join("\n");
+}
+
+async function runInlineSelfCheckCycle(
+  info: SelfCheckLogFn,
+  api: OpenClawPluginApi,
+  params: {
+    binding: SessionBinding;
+    originalContent: string;
+    canReplaceContent: boolean;
+    runtimeSelection: SessionRuntimeSelection;
+    accountId?: string;
+    messageThreadId?: string | number;
+  },
+): Promise<SelfCheckInlineDecision> {
+  const { binding, originalContent, canReplaceContent, runtimeSelection } = params;
+  const initialGate = readGateState(binding.entry);
+  if (!initialGate?.armed) {
+    return { kind: "allow" };
+  }
+
+  const sessionId = normalizeText(binding.entry.sessionId) || binding.sessionKey;
+  const accountId =
+    normalizeText(params.accountId) || normalizeText(binding.entry.deliveryContext?.accountId);
+  const messageThreadId =
+    params.messageThreadId ?? binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId;
+
+  let candidateContent = originalContent;
+  let attempts = initialGate.attempts;
+  let sameHashCount = initialGate.sameHashCount;
+  let progressHash = initialGate.progressHash;
+  let lastVerdict = initialGate.lastVerdict;
+
+  const resetAndPersist = async (verdict?: SelfCheckVerdictState) => {
+    writeGateState(binding.entry, buildResetGateState(verdict ?? lastVerdict));
+    await persistBindingEntry(info, api, binding);
+  };
+
+  try {
+    while (true) {
+      attempts += 1;
+      const selfCheckGate: SelfCheckGateState = {
+        armed: true,
+        phase: "self_check",
+        attempts,
+        sameHashCount,
+        ...(progressHash ? { progressHash } : {}),
+        pendingFinal: candidateContent,
+        ...(lastVerdict ? { lastVerdict } : {}),
+        updatedAtMs: Date.now(),
+      };
+      info("message_sending phase_transition", {
+        sessionKey: binding.sessionKey,
+        from: attempts === initialGate.attempts + 1 ? initialGate.phase : "work",
+        to: selfCheckGate.phase,
+        attempts: selfCheckGate.attempts,
+        sameHashCount: selfCheckGate.sameHashCount,
+      });
+      writeGateState(binding.entry, selfCheckGate);
+      await persistBindingEntry(info, api, binding);
+
+      info("message_sending schedule_followup", {
+        kind: "self_check",
+        mode: "inline",
+        sessionKey: binding.sessionKey,
+        sessionId,
+        delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
+        messageThreadId,
+      });
+      const selfCheckResult = await runInlineFollowupTurn(info, api, {
+        kind: "self_check",
+        agentId: binding.agentId,
+        sessionId,
+        sessionKey: binding.sessionKey,
+        channelId: TELEGRAM_CHANNEL_ID,
+        accountId,
+        messageThreadId,
+        delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
+        prompt: formatSelfCheckPrompt(info, {
+          sessionKey: binding.sessionKey,
+          attempts: selfCheckGate.attempts,
+          sameHashCount: selfCheckGate.sameHashCount,
+          pendingFinal: candidateContent,
+        }),
+        runtimeSelection,
+      });
+      const verdictText = extractVisibleTextFromRunResult(selfCheckResult) ?? "";
+      info("message_sending parse_verdict", {
+        sessionKey: binding.sessionKey,
+        length: verdictText.length,
+      });
+
+      const parsedVerdict = parseVerdict(verdictText);
+      const verdict: SelfCheckVerdict =
+        parsedVerdict ??
+        ({
+          state: "blocked_external",
+          progressHash: stableHash(verdictText || "invalid-self-check-verdict"),
+          reason: "Self-check verdict was not valid JSON.",
+          blockers: ["invalid self-check verdict"],
+        } satisfies SelfCheckVerdict);
+      if (!parsedVerdict) {
+        info("message_sending verdict_invalid", {
+          sessionKey: binding.sessionKey,
+          nextPhase: "finalize",
+        });
+      }
+
+      sameHashCount = verdict.progressHash === progressHash ? sameHashCount + 1 : 0;
+      progressHash = verdict.progressHash;
+      lastVerdict = verdict.state;
+      info("message_sending verdict_parsed", {
+        sessionKey: binding.sessionKey,
+        verdictState: verdict.state,
+        progressHash: verdict.progressHash,
+        sameHashCount,
+        attempts,
+      });
+
+      if (sameHashCount >= MAX_SAME_HASH || attempts >= MAX_ATTEMPTS) {
+        const stopContent = buildStopPrompt(verdict, {
+          ...selfCheckGate,
+          sameHashCount,
+        });
+        info("message_sending stop", {
+          sessionKey: binding.sessionKey,
+          reason: sameHashCount >= MAX_SAME_HASH ? "same_hash_limit" : "attempt_limit",
+          sameHashCount,
+          attempts,
+          nextPhase: "finalize",
+        });
+        await resetAndPersist("blocked_external");
+        return resolveInlineDecision({
+          canReplaceContent,
+          originalContent,
+          finalContent: stopContent,
+          denyReason: "inline_release_not_supported_after_stop",
+        });
+      }
+
+      if (verdict.state === "continue") {
+        const continueIterations = Math.max(0, attempts - 1);
+        if (continueIterations >= MAX_CONTINUE_ITERATIONS) {
+          const stopContent = buildStopPrompt(
+            {
+              ...verdict,
+              state: "blocked_external",
+              reason:
+                verdict.reason?.trim() || "Reached the maximum number of continuation iterations.",
+              blockers: verdict.blockers?.length
+                ? verdict.blockers
+                : ["continuation iteration limit reached"],
+            },
+            {
+              ...selfCheckGate,
+              sameHashCount,
+            },
+          );
+          info("message_sending stop", {
+            sessionKey: binding.sessionKey,
+            reason: "continue_iteration_limit",
+            continueIterations,
+            maxContinueIterations: MAX_CONTINUE_ITERATIONS,
+            attempts,
+            nextPhase: "finalize",
+          });
+          await resetAndPersist("blocked_external");
+          return resolveInlineDecision({
+            canReplaceContent,
+            originalContent,
+            finalContent: stopContent,
+            denyReason: "inline_release_not_supported_after_continue_limit",
+          });
+        }
+        const workGate: SelfCheckGateState = {
+          armed: true,
+          phase: "work",
+          attempts,
+          sameHashCount,
+          progressHash: verdict.progressHash,
+          lastVerdict: verdict.state,
+          updatedAtMs: Date.now(),
+        };
+        info("message_sending phase_transition", {
+          sessionKey: binding.sessionKey,
+          from: selfCheckGate.phase,
+          to: workGate.phase,
+          verdictState: verdict.state,
+          sameHashCount,
+        });
+        writeGateState(binding.entry, workGate);
+        await persistBindingEntry(info, api, binding);
+
+        info("message_sending schedule_followup", {
+          kind: "continue",
+          mode: "inline",
+          sessionKey: binding.sessionKey,
+          sessionId,
+          nextAction: verdict.nextAction,
+          messageThreadId,
+        });
+        const continueResult = await runInlineFollowupTurn(info, api, {
+          kind: "continue",
+          agentId: binding.agentId,
+          sessionId,
+          sessionKey: binding.sessionKey,
+          channelId: TELEGRAM_CHANNEL_ID,
+          accountId,
+          messageThreadId,
+          delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
+          prompt: buildContinuePrompt(verdict, workGate),
+          runtimeSelection,
+        });
+        const nextCandidate = extractVisibleTextFromRunResult(continueResult);
+        if (!nextCandidate) {
+          const blockedContent = buildStopPrompt(
+            {
+              state: "blocked_external",
+              progressHash: stableHash("missing-continue-output"),
+              reason: "Continue turn produced no visible final content.",
+              blockers: ["empty continue result"],
+            },
+            workGate,
+          );
+          info("message_sending stop", {
+            sessionKey: binding.sessionKey,
+            reason: "empty_continue_result",
+            attempts,
+            nextPhase: "finalize",
+          });
+          await resetAndPersist("blocked_external");
+          return resolveInlineDecision({
+            canReplaceContent,
+            originalContent,
+            finalContent: blockedContent,
+            denyReason: "inline_release_not_supported_after_empty_continue",
+          });
+        }
+        candidateContent = nextCandidate;
+        continue;
+      }
+
+      info("message_sending release_final", {
+        sessionKey: binding.sessionKey,
+        verdictState: verdict.state,
+        contentLength: candidateContent.length,
+      });
+      await resetAndPersist(verdict.state);
+      return resolveInlineDecision({
+        canReplaceContent,
+        originalContent,
+        finalContent: candidateContent,
+        denyReason: "inline_terminal_replace_not_supported",
+      });
+    }
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : typeof error === "string" ? error : "unknown";
+    api.logger.warn(
+      `self-check-gate: inline self-check failed sessionKey=${binding.sessionKey} error=${message}`,
+    );
+    await resetAndPersist();
+    return { kind: "allow" };
+  }
 }
 
 export default definePluginEntry({
@@ -913,11 +1219,13 @@ export default definePluginEntry({
       }
       const gate = readGateState(binding.entry);
       const runtimeSelection = resolveSessionRuntimeSelection(binding.entry);
+      const canReplaceContent = supportsInlineContentReplacement(hookEvent);
       info("message_sending binding", {
         sessionKey: binding.sessionKey,
         agentId: binding.agentId,
         armed: gate?.armed === true,
         phase: gate?.phase,
+        canReplaceContent,
         runtimeProvider: runtimeSelection.provider,
         runtimeModel: runtimeSelection.model,
         authProfileId: runtimeSelection.authProfileId,
@@ -964,574 +1272,46 @@ export default definePluginEntry({
       }
 
       if (gate.phase === "work") {
-        const nextGate = {
-          ...gate,
-          phase: "self_check" as const,
-          attempts: gate.attempts + 1,
-          pendingFinal: content,
-          sameHashCount: gate.sameHashCount,
-          updatedAtMs: Date.now(),
-        };
-        info("message_sending phase_transition", {
-          sessionKey: binding.sessionKey,
-          from: gate.phase,
-          to: nextGate.phase,
-          attempts: nextGate.attempts,
-          sameHashCount: nextGate.sameHashCount,
-        });
-        writeGateState(binding.entry, nextGate);
-        const sessionId = normalizeText(binding.entry.sessionId) || binding.sessionKey;
-        await saveSessionStore(info, api, binding.storePath, {
-          ...(await loadSessionStore(api, binding.storePath, info)),
-          [binding.sessionKey]: binding.entry,
-        });
-        info("message_sending schedule_followup", {
-          kind: "self_check",
-          sessionKey: binding.sessionKey,
-          sessionId,
-          delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-        });
-        await scheduleSelfCheckFollowup(info, api, {
-          agentId: binding.agentId,
-          sessionId,
-          sessionKey: binding.sessionKey,
-          channelId: TELEGRAM_CHANNEL_ID,
-          accountId:
-            normalizeText(hookCtx.accountId) ||
-            normalizeText(binding.entry.deliveryContext?.accountId),
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          delayMs: SELF_CHECK_FOLLOWUP_DELAY_MS,
-          prompt: formatSelfCheckPrompt(info, {
-            sessionKey: binding.sessionKey,
-            attempts: nextGate.attempts,
-            sameHashCount: nextGate.sameHashCount,
-            pendingFinal: content,
-          }),
+        const decision = await runInlineSelfCheckCycle(info, api, {
+          binding,
+          originalContent: content,
+          canReplaceContent,
           runtimeSelection,
+          accountId: hookCtx.accountId,
+          messageThreadId:
+            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
         });
+        if (decision.kind === "allow") {
+          info("message_sending allow", {
+            reason: "inline_self_check_released",
+            sessionKey: binding.sessionKey,
+          });
+          return;
+        }
+        if (decision.kind === "replace") {
+          info("message_sending allow", {
+            reason: "inline_self_check_replaced",
+            sessionKey: binding.sessionKey,
+            contentLength: decision.content.length,
+          });
+          return { content: decision.content };
+        }
         info("message_sending cancel", {
-          reason: "self_check_scheduled",
+          reason: decision.reason,
           sessionKey: binding.sessionKey,
         });
         return { cancel: true };
       }
 
-      if (gate.phase === "self_check") {
-        info("message_sending parse_verdict", {
-          sessionKey: binding.sessionKey,
-          length: content.length,
-        });
-        const verdict = parseVerdict(content);
-        if (!verdict) {
-          const fallbackGate = {
-            ...gate,
-            phase: "finalize" as const,
-            releaseKind: "blocked_external" as const,
-            pendingFinal: buildStopPrompt(
-              {
-                state: "blocked_external",
-                progressHash: stableHash(content),
-                reason: "Self-check verdict was not valid JSON.",
-                blockers: ["invalid self-check verdict"],
-              },
-              gate,
-            ),
-            lastVerdict: "blocked_external" as const,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending verdict_invalid", {
-            sessionKey: binding.sessionKey,
-            nextPhase: fallbackGate.phase,
-            releaseKind: fallbackGate.releaseKind,
-          });
-          writeGateState(binding.entry, fallbackGate);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "release_invalid_verdict",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: fallbackGate.pendingFinal || "",
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "invalid_verdict_release_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        const sameHashCount =
-          verdict.progressHash === gate.progressHash ? gate.sameHashCount + 1 : 0;
-        const attempts = gate.attempts;
-        info("message_sending verdict_parsed", {
-          sessionKey: binding.sessionKey,
-          verdictState: verdict.state,
-          progressHash: verdict.progressHash,
-          sameHashCount,
-          attempts,
-        });
-        if (sameHashCount >= MAX_SAME_HASH || attempts >= MAX_ATTEMPTS) {
-          const stopper: SelfCheckGateState = {
-            ...gate,
-            phase: "finalize",
-            sameHashCount,
-            releaseKind: "blocked_external",
-            pendingFinal: buildStopPrompt(verdict, { ...gate, sameHashCount }),
-            lastVerdict: verdict.state,
-            progressHash: verdict.progressHash,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending stop", {
-            sessionKey: binding.sessionKey,
-            reason: sameHashCount >= MAX_SAME_HASH ? "same_hash_limit" : "attempt_limit",
-            sameHashCount,
-            attempts,
-            nextPhase: stopper.phase,
-          });
-          writeGateState(binding.entry, stopper);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "stop",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: stopper.pendingFinal || "",
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "stop_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        if (verdict.state === "continue") {
-          const nextGate: SelfCheckGateState = {
-            ...gate,
-            phase: "work",
-            attempts: gate.attempts,
-            sameHashCount,
-            progressHash: verdict.progressHash,
-            releaseKind: undefined,
-            pendingFinal: undefined,
-            lastVerdict: verdict.state,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending phase_transition", {
-            sessionKey: binding.sessionKey,
-            from: gate.phase,
-            to: nextGate.phase,
-            verdictState: verdict.state,
-            sameHashCount,
-          });
-          writeGateState(binding.entry, nextGate);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "continue",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            nextAction: verdict.nextAction,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: buildContinuePrompt(verdict, nextGate),
-            runtimeSelection,
-          });
-          info("message_sending cancel", {
-            reason: "continue_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        const releaseKind: ReleaseKind =
-          verdict.state === "done"
-            ? "final"
-            : verdict.state === "wait_external"
-              ? "wait_external"
-              : "blocked_external";
-        const nextGate: SelfCheckGateState = {
-          ...gate,
-          phase: "finalize",
-          attempts: gate.attempts,
-          sameHashCount,
-          progressHash: verdict.progressHash,
-          releaseKind,
-          pendingFinal:
-            releaseKind === "final"
-              ? gate.pendingFinal
-              : buildStopPrompt(verdict, { ...gate, sameHashCount }),
-          lastVerdict: verdict.state,
-          updatedAtMs: Date.now(),
-        };
-        info("message_sending phase_transition", {
-          sessionKey: binding.sessionKey,
-          from: gate.phase,
-          to: nextGate.phase,
-          verdictState: verdict.state,
-          releaseKind,
-          sameHashCount,
-        });
-        writeGateState(binding.entry, nextGate);
-        await saveSessionStore(info, api, binding.storePath, {
-          ...(await loadSessionStore(api, binding.storePath, info)),
-          [binding.sessionKey]: binding.entry,
-        });
-        info("message_sending schedule_followup", {
-          kind: "release",
-          sessionKey: binding.sessionKey,
-          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-          releaseKind,
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-        });
-        await scheduleSelfCheckFollowup(info, api, {
-          agentId: binding.agentId,
-          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-          sessionKey: binding.sessionKey,
-          channelId: TELEGRAM_CHANNEL_ID,
-          accountId:
-            normalizeText(hookCtx.accountId) ||
-            normalizeText(binding.entry.deliveryContext?.accountId),
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          prompt:
-            releaseKind === "final"
-              ? formatReleasePrompt(info, { state: nextGate, reason: verdict.reason })
-              : nextGate.pendingFinal || "",
-          runtimeSelection,
-        });
-        info("message_sending cancel", {
-          reason: "release_followup_scheduled",
-          sessionKey: binding.sessionKey,
-          releaseKind,
-        });
-        return { cancel: true };
-      }
-
-      if (gate.phase === "finalize") {
-        info("message_sending release_final", {
-          sessionKey: binding.sessionKey,
-          releaseKind: gate.releaseKind,
-          lastVerdict: gate.lastVerdict,
-        });
-        clearGateState(binding.entry);
-        await saveSessionStore(info, api, binding.storePath, {
-          ...(await loadSessionStore(api, binding.storePath, info)),
-          [binding.sessionKey]: binding.entry,
-        });
-        info("message_sending allow", {
-          reason: "final_message_released",
-          sessionKey: binding.sessionKey,
-        });
-        return;
-      }
+      info("message_sending allow", {
+        reason: "non_work_phase_passthrough",
+        sessionKey: binding.sessionKey,
+        phase: gate.phase,
+      });
+      return;
     });
   },
 });
-/*
-      if (gate.phase === "self_check") {
-        info("message_sending parse_verdict", {
-          sessionKey: binding.sessionKey,
-          length: content.length,
-        });
-        const verdict = parseVerdict(content);
-        if (!verdict) {
-          const fallbackGate = {
-            ...gate,
-            phase: "finalize" as const,
-            releaseKind: "blocked_external" as const,
-            pendingFinal: buildStopPrompt(
-              {
-                state: "blocked_external",
-                progressHash: stableHash(content),
-                reason: "Self-check verdict was not valid JSON.",
-                blockers: ["invalid self-check verdict"],
-              },
-              gate,
-            ),
-            lastVerdict: "blocked_external" as const,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending verdict_invalid", {
-            sessionKey: binding.sessionKey,
-            nextPhase: fallbackGate.phase,
-            releaseKind: fallbackGate.releaseKind,
-          });
-          writeGateState(binding.entry, fallbackGate);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "release_invalid_verdict",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: fallbackGate.pendingFinal || "",
-          });
-          info("message_sending cancel", {
-            reason: "invalid_verdict_release_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        const sameHashCount =
-          verdict.progressHash === gate.progressHash ? gate.sameHashCount + 1 : 0;
-        const attempts = gate.attempts;
-        info("message_sending verdict_parsed", {
-          sessionKey: binding.sessionKey,
-          verdictState: verdict.state,
-          progressHash: verdict.progressHash,
-          sameHashCount,
-          attempts,
-        });
-        if (sameHashCount >= MAX_SAME_HASH || attempts >= MAX_ATTEMPTS) {
-          const stopper: SelfCheckGateState = {
-            ...gate,
-            phase: "finalize",
-            sameHashCount,
-            releaseKind: "blocked_external",
-            pendingFinal: buildStopPrompt(verdict, { ...gate, sameHashCount }),
-            lastVerdict: verdict.state,
-            progressHash: verdict.progressHash,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending stop", {
-            sessionKey: binding.sessionKey,
-            reason: sameHashCount >= MAX_SAME_HASH ? "same_hash_limit" : "attempt_limit",
-            sameHashCount,
-            attempts,
-            nextPhase: stopper.phase,
-          });
-          writeGateState(binding.entry, stopper);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "stop",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: stopper.pendingFinal || "",
-          });
-          info("message_sending cancel", {
-            reason: "stop_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        if (verdict.state === "continue") {
-          const nextGate: SelfCheckGateState = {
-            ...gate,
-            phase: "work",
-            attempts: gate.attempts,
-            sameHashCount,
-            progressHash: verdict.progressHash,
-            releaseKind: undefined,
-            pendingFinal: undefined,
-            lastVerdict: verdict.state,
-            updatedAtMs: Date.now(),
-          };
-          info("message_sending phase_transition", {
-            sessionKey: binding.sessionKey,
-            from: gate.phase,
-            to: nextGate.phase,
-            verdictState: verdict.state,
-            sameHashCount,
-          });
-          writeGateState(binding.entry, nextGate);
-          await saveSessionStore(info, api, binding.storePath, {
-            ...(await loadSessionStore(api, binding.storePath, info)),
-            [binding.sessionKey]: binding.entry,
-          });
-          info("message_sending schedule_followup", {
-            kind: "continue",
-            sessionKey: binding.sessionKey,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            nextAction: verdict.nextAction,
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          });
-          await scheduleSelfCheckFollowup(info, api, {
-            agentId: binding.agentId,
-            sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-            sessionKey: binding.sessionKey,
-            channelId: TELEGRAM_CHANNEL_ID,
-            accountId:
-              normalizeText(hookCtx.accountId) ||
-              normalizeText(binding.entry.deliveryContext?.accountId),
-            messageThreadId:
-              binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-            prompt: buildContinuePrompt(verdict, nextGate),
-          });
-          info("message_sending cancel", {
-            reason: "continue_followup_scheduled",
-            sessionKey: binding.sessionKey,
-          });
-          return { cancel: true };
-        }
-
-        const releaseKind: ReleaseKind =
-          verdict.state === "done"
-            ? "final"
-            : verdict.state === "wait_external"
-              ? "wait_external"
-              : "blocked_external";
-        const nextGate: SelfCheckGateState = {
-          ...gate,
-          phase: "finalize",
-          attempts: gate.attempts,
-          sameHashCount,
-          progressHash: verdict.progressHash,
-          releaseKind,
-          pendingFinal:
-            releaseKind === "final"
-              ? gate.pendingFinal
-              : buildStopPrompt(verdict, { ...gate, sameHashCount }),
-          lastVerdict: verdict.state,
-          updatedAtMs: Date.now(),
-        };
-        info("message_sending phase_transition", {
-          sessionKey: binding.sessionKey,
-          from: gate.phase,
-          to: nextGate.phase,
-          verdictState: verdict.state,
-          releaseKind,
-          sameHashCount,
-        });
-        writeGateState(binding.entry, nextGate);
-        await saveSessionStore(info, api, binding.storePath, {
-          ...(await loadSessionStore(api, binding.storePath, info)),
-          [binding.sessionKey]: binding.entry,
-        });
-        info("message_sending schedule_followup", {
-          kind: "release",
-          sessionKey: binding.sessionKey,
-          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-          releaseKind,
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-        });
-        await scheduleSelfCheckFollowup(info, api, {
-          agentId: binding.agentId,
-          sessionId: normalizeText(binding.entry.sessionId) || binding.sessionKey,
-          sessionKey: binding.sessionKey,
-          channelId: TELEGRAM_CHANNEL_ID,
-          accountId:
-            normalizeText(hookCtx.accountId) ||
-            normalizeText(binding.entry.deliveryContext?.accountId),
-          messageThreadId:
-            binding.entry.deliveryContext?.threadId ?? binding.entry.lastThreadId ?? undefined,
-          prompt:
-            releaseKind === "final"
-              ? formatReleasePrompt(info, { state: nextGate, reason: verdict.reason })
-              : nextGate.pendingFinal || "",
-        });
-        info("message_sending cancel", {
-          reason: "release_followup_scheduled",
-          sessionKey: binding.sessionKey,
-          releaseKind,
-        });
-        return { cancel: true };
-      }
-
-      if (gate.phase === "finalize") {
-        info("message_sending release_final", {
-          sessionKey: binding.sessionKey,
-          releaseKind: gate.releaseKind,
-          lastVerdict: gate.lastVerdict,
-        });
-        clearGateState(binding.entry);
-        await saveSessionStore(info, api, binding.storePath, {
-          ...(await loadSessionStore(api, binding.storePath, info)),
-          [binding.sessionKey]: binding.entry,
-        });
-        info("message_sending allow", {
-          reason: "final_message_released",
-          sessionKey: binding.sessionKey,
-        });
-        return;
-      }
-    });
-  },
-});
-
-*/
 
 async function findGateBindingForTool(
   info: SelfCheckLogFn,
