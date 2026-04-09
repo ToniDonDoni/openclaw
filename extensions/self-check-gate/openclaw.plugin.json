@@ -1,0 +1,10 @@
+{
+  "id": "self-check-gate",
+  "name": "Self Check Gate",
+  "description": "Session-scoped self-check gate for Telegram followup validation.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
