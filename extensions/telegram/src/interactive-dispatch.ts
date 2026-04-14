@@ -6,6 +6,7 @@ import {
   type PluginConversationBindingRequestResult,
   type PluginInteractiveRegistration,
 } from "openclaw/plugin-sdk/plugin-runtime";
+import { info } from "openclaw/plugin-sdk/runtime-env";
 
 export type TelegramInteractiveButtons = Array<
   Array<{ text: string; callback_data: string; style?: "danger" | "success" | "primary" }>
@@ -81,7 +82,10 @@ export async function dispatchTelegramPluginInteractiveHandler(params: {
   };
   onMatched?: () => Promise<void> | void;
 }) {
-  return await dispatchPluginInteractiveHandler<TelegramInteractiveHandlerRegistration>({
+  info(
+    `telegram-debug: interactive_dispatch_enter callbackId=${params.callbackId} conversationId=${params.ctx.conversationId} parentConversationId=${params.ctx.parentConversationId ?? "none"} senderId=${params.ctx.senderId ?? "none"} messageId=${params.ctx.callbackMessage.messageId} data=${JSON.stringify(params.data)}`,
+  );
+  const result = await dispatchPluginInteractiveHandler<TelegramInteractiveHandlerRegistration>({
     channel: "telegram",
     data: params.data,
     dedupeId: params.callbackId,
@@ -114,4 +118,8 @@ export async function dispatchTelegramPluginInteractiveHandler(params: {
       });
     },
   });
+  info(
+    `telegram-debug: interactive_dispatch_exit callbackId=${params.callbackId} conversationId=${params.ctx.conversationId} senderId=${params.ctx.senderId ?? "none"} messageId=${params.ctx.callbackMessage.messageId} handled=${result.handled}`,
+  );
+  return result;
 }

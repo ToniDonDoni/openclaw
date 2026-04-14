@@ -1,6 +1,6 @@
 import type { ReplyToMode } from "openclaw/plugin-sdk/config-runtime";
 import type { TelegramAccountConfig } from "openclaw/plugin-sdk/config-runtime";
-import { danger, logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
+import { danger, logVerbose, shouldLogVerbose, info } from "openclaw/plugin-sdk/runtime-env";
 import type { RuntimeEnv } from "openclaw/plugin-sdk/runtime-env";
 import type { TelegramBotDeps } from "./bot-deps.js";
 import {
@@ -68,6 +68,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
     const ingressDebugEnabled =
       shouldLogVerbose() || process.env.OPENCLAW_DEBUG_TELEGRAM_INGRESS === "1";
     const ingressContextStartMs = ingressReceivedAtMs ? Date.now() : undefined;
+    info(
+      `telegram-debug: processMessage enter chatId=${primaryCtx.message.chat.id} senderId=${primaryCtx.message.from?.id ?? "none"} messageId=${primaryCtx.message.message_id ?? "none"} mediaCount=${allMedia.length} storeAllowFrom=${JSON.stringify(storeAllowFrom)} buffer=${options?.ingressBuffer ?? "none"}`,
+    );
     const context = await buildTelegramMessageContext({
       primaryCtx,
       allMedia,
@@ -92,6 +95,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
       upsertPairingRequest: telegramDeps.upsertChannelPairingRequest,
     });
     if (!context) {
+      info(
+        `telegram-debug: processMessage dropped_no_context chatId=${primaryCtx.message.chat.id} senderId=${primaryCtx.message.from?.id ?? "none"} messageId=${primaryCtx.message.message_id ?? "none"} buffer=${options?.ingressBuffer ?? "none"}`,
+      );
       if (ingressDebugEnabled && ingressReceivedAtMs && ingressContextStartMs) {
         logVerbose(
           `telegram ingress: chatId=${primaryCtx.message.chat.id} dropped after ${Date.now() - ingressReceivedAtMs}ms` +
@@ -107,6 +113,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
           (options?.ingressBuffer ? ` buffer=${options.ingressBuffer}` : ""),
       );
     }
+    info(
+      `telegram-debug: processMessage context_ready chatId=${context.chatId} senderId=${context.msg.from?.id ?? "none"} messageId=${context.msg.message_id ?? "none"} sessionKey=${context.ctxPayload.SessionKey ?? "none"} routeAgentId=${context.route.agentId} routeAccountId=${context.route.accountId}`,
+    );
     try {
       await dispatchTelegramMessage({
         context,
@@ -120,6 +129,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         telegramDeps,
         opts,
       });
+      info(
+        `telegram-debug: processMessage dispatch_complete chatId=${context.chatId} senderId=${context.msg.from?.id ?? "none"} messageId=${context.msg.message_id ?? "none"} sessionKey=${context.ctxPayload.SessionKey ?? "none"}`,
+      );
       if (ingressDebugEnabled && ingressReceivedAtMs) {
         logVerbose(
           `telegram ingress: chatId=${context.chatId} dispatchCompleteMs=${Date.now() - ingressReceivedAtMs}` +
@@ -127,6 +139,9 @@ export const createTelegramMessageProcessor = (deps: TelegramMessageProcessorDep
         );
       }
     } catch (err) {
+      info(
+        `telegram-debug: processMessage dispatch_error chatId=${context.chatId} senderId=${context.msg.from?.id ?? "none"} messageId=${context.msg.message_id ?? "none"} sessionKey=${context.ctxPayload.SessionKey ?? "none"} error=${JSON.stringify(String(err))}`,
+      );
       runtime.error?.(danger(`telegram message processing failed: ${String(err)}`));
       try {
         await bot.api.sendMessage(

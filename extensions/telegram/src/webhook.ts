@@ -260,6 +260,9 @@ export async function startTelegramWebhook(opts: {
   }
   const runtime = opts.runtime ?? defaultRuntime;
   const diagnosticsEnabled = isDiagnosticsEnabled(opts.config);
+  runtime.log?.(
+    `telegram-debug: startTelegramWebhook enter accountId=${opts.accountId ?? "default"} path=${path} host=${host} port=${port} diagnosticsEnabled=${diagnosticsEnabled}`,
+  );
   const bot = createTelegramBot({
     token: opts.token,
     runtime,
@@ -297,11 +300,17 @@ export async function startTelegramWebhook(opts: {
     };
 
     if (req.url === healthPath) {
+      runtime.log?.(
+        `telegram-debug: webhook_request healthcheck path=${req.url} method=${req.method}`,
+      );
       res.writeHead(200);
       res.end("ok");
       return;
     }
     if (req.url !== path || req.method !== "POST") {
+      runtime.log?.(
+        `telegram-debug: webhook_request rejected path=${req.url ?? "none"} method=${req.method ?? "none"} expectedPath=${path}`,
+      );
       res.writeHead(404);
       res.end();
       return;
@@ -316,6 +325,9 @@ export async function startTelegramWebhook(opts: {
         rateLimitKey: resolveTelegramWebhookRateLimitKey(req, path, opts.config),
       })
     ) {
+      runtime.log?.(
+        `telegram-debug: webhook_request blocked_by_guard path=${req.url} method=${req.method} remote=${resolveTelegramWebhookClientIp(req, opts.config)}`,
+      );
       return;
     }
     const startTime = Date.now();
@@ -324,6 +336,9 @@ export async function startTelegramWebhook(opts: {
     }
     const secretHeader = resolveSingleHeaderValue(req.headers["x-telegram-bot-api-secret-token"]);
     if (!hasValidTelegramWebhookSecret(secretHeader, secret)) {
+      runtime.log?.(
+        `telegram-debug: webhook_request unauthorized path=${req.url} method=${req.method} remote=${resolveTelegramWebhookClientIp(req, opts.config)} secretPresent=${Boolean(secretHeader)}`,
+      );
       res.shouldKeepAlive = false;
       res.setHeader("Connection", "close");
       respondText(401, "unauthorized");
@@ -336,6 +351,9 @@ export async function startTelegramWebhook(opts: {
         emptyObjectOnEmpty: false,
       });
       if (!body.ok) {
+        runtime.log?.(
+          `telegram-debug: webhook_request body_error path=${req.url} method=${req.method} code=${body.code}`,
+        );
         if (body.code === "PAYLOAD_TOO_LARGE") {
           respondText(413, body.error);
           return;
@@ -376,6 +394,9 @@ export async function startTelegramWebhook(opts: {
       if (!replied) {
         respondText(200);
       }
+      runtime.log?.(
+        `telegram-debug: webhook_request handled path=${req.url} method=${req.method} responded=${replied ? "callback" : "default-200"} diagnosticsEnabled=${diagnosticsEnabled}`,
+      );
 
       if (diagnosticsEnabled) {
         logWebhookProcessed({
@@ -386,6 +407,9 @@ export async function startTelegramWebhook(opts: {
       }
     })().catch((err) => {
       const errMsg = formatErrorMessage(err);
+      runtime.log?.(
+        `telegram-debug: webhook_request failed path=${req.url} method=${req.method} error=${errMsg}`,
+      );
       if (diagnosticsEnabled) {
         logWebhookError({
           channel: "telegram",
@@ -436,6 +460,9 @@ export async function startTelegramWebhook(opts: {
 
   runtime.log?.(`webhook local listener on http://${host}:${boundPort}${path}`);
   runtime.log?.(`webhook advertised to telegram on ${publicUrl}`);
+  runtime.log?.(
+    `telegram-debug: webhook_listening host=${host} port=${boundPort} path=${path} publicUrl=${publicUrl}`,
+  );
 
   let shutDown = false;
   const shutdown = () => {

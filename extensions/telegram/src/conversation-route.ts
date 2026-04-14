@@ -16,7 +16,7 @@ import {
   resolveAgentIdFromSessionKey,
   sanitizeAgentId,
 } from "openclaw/plugin-sdk/routing";
-import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
+import { info, logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import {
   buildTelegramGroupPeerId,
@@ -95,6 +95,10 @@ export function resolveTelegramConversationRoute(params: {
     );
   }
 
+  info(
+    `telegram-debug: resolveTelegramConversationRoute base chatId=${params.chatId} senderId=${params.senderId ?? "none"} peerId=${peerId} parentPeer=${parentPeer?.id ?? "none"} routeAgentId=${route.agentId} routeAccountId=${route.accountId} matchedBy=${route.matchedBy} sessionKey=${route.sessionKey}`,
+  );
+
   const configuredRoute = resolveConfiguredBindingRoute({
     cfg: params.cfg,
     route,
@@ -145,6 +149,10 @@ export function resolveTelegramConversationRoute(params: {
       );
     }
   }
+
+  info(
+    `telegram-debug: resolveTelegramConversationRoute final chatId=${params.chatId} senderId=${params.senderId ?? "none"} peerId=${peerId} configuredBinding=${configuredBinding ? "yes" : "no"} configuredBindingSessionKey=${configuredBindingSessionKey || "none"} routeAgentId=${route.agentId} routeAccountId=${route.accountId} matchedBy=${route.matchedBy} sessionKey=${route.sessionKey}`,
+  );
 
   return {
     route,

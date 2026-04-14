@@ -189,6 +189,9 @@ export const dispatchTelegramMessage = async ({
     statusReactionController,
   } = context;
 
+  runtime.log?.(
+    `telegram-debug: dispatchTelegramMessage enter chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} agentId=${route.agentId} accountId=${route.accountId} isGroup=${isGroup}`,
+  );
   const draftMaxChars = Math.min(textLimit, 4096);
   const tableMode = resolveMarkdownTableMode({
     cfg,
@@ -446,8 +449,14 @@ export const dispatchTelegramMessage = async ({
           cachedAt: new Date().toISOString(),
           receivedFrom: ctxPayload.From,
         });
+        runtime.log?.(
+          `telegram-debug: dispatchTelegramMessage sticker_cache_saved chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} stickerFileUniqueId=${sticker.fileUniqueId}`,
+        );
         logVerbose(`telegram: cached sticker description for ${sticker.fileUniqueId}`);
       } else {
+        runtime.log?.(
+          `telegram-debug: dispatchTelegramMessage sticker_cache_skipped chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} reason=missing-fileId`,
+        );
         logVerbose(`telegram: skipped sticker cache (missing fileId)`);
       }
     }
@@ -599,16 +608,19 @@ export const dispatchTelegramMessage = async ({
 
   let dispatchError: unknown;
   try {
+    runtime.log?.(
+      `telegram-debug: dispatchTelegramMessage before_dispatchReply chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"}`,
+    );
     ({ queuedFinal } = await telegramDeps.dispatchReplyWithBufferedBlockDispatcher({
       ctx: ctxPayload,
       cfg,
       dispatcherOptions: {
         ...replyPipeline,
-        deliver: async (payload, info) => {
+        deliver: async (payload, deliveryInfo) => {
           if (payload.isError === true) {
             hadErrorReplyFailureOrSkip = true;
           }
-          if (info.kind === "final") {
+          if (deliveryInfo.kind === "final") {
             // Assistant callbacks are fire-and-forget; ensure queued boundary
             // rotations/partials are applied before final delivery mapping.
             await enqueueDraftLaneEvent(async () => {});
@@ -620,6 +632,9 @@ export const dispatchTelegramMessage = async ({
               payload,
             })
           ) {
+            runtime.log?.(
+              `telegram-debug: dispatchTelegramMessage skip_local_exec_approval_prompt chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"}`,
+            );
             queuedFinal = true;
             return;
           }
@@ -654,7 +669,7 @@ export const dispatchTelegramMessage = async ({
           for (const segment of segments) {
             if (
               segment.lane === "answer" &&
-              info.kind === "final" &&
+              deliveryInfo.kind === "final" &&
               reasoningStepState.shouldBufferFinalAnswer()
             ) {
               reasoningStepState.bufferFinalAnswer({
@@ -670,11 +685,11 @@ export const dispatchTelegramMessage = async ({
               laneName: segment.lane,
               text: segment.text,
               payload,
-              infoKind: info.kind,
+                infoKind: deliveryInfo.kind,
               previewButtons,
               allowPreviewUpdateForNonFinal: segment.lane === "reasoning",
             });
-            if (info.kind === "final") {
+            if (deliveryInfo.kind === "final") {
               emitPreviewFinalizedHook(result);
             }
             if (segment.lane === "reasoning") {
@@ -684,7 +699,7 @@ export const dispatchTelegramMessage = async ({
               }
               continue;
             }
-            if (info.kind === "final") {
+            if (deliveryInfo.kind === "final") {
               if (reasoningLane.hasStreamedMessage) {
                 activePreviewLifecycleByLane.reasoning = "complete";
                 retainPreviewOnCleanupByLane.reasoning = true;
@@ -701,38 +716,41 @@ export const dispatchTelegramMessage = async ({
                 typeof payload.text === "string" ? { ...payload, text: "" } : payload;
               await sendPayload(payloadWithoutSuppressedReasoning);
             }
-            if (info.kind === "final") {
+            if (deliveryInfo.kind === "final") {
               await flushBufferedFinalAnswer();
             }
             return;
           }
 
-          if (info.kind === "final") {
+          if (deliveryInfo.kind === "final") {
             await answerLane.stream?.stop();
             await reasoningLane.stream?.stop();
             reasoningStepState.resetForNextStep();
           }
           const canSendAsIs = reply.hasMedia || reply.text.length > 0;
           if (!canSendAsIs) {
-            if (info.kind === "final") {
+            if (deliveryInfo.kind === "final") {
               await flushBufferedFinalAnswer();
             }
             return;
           }
           await sendPayload(payload);
-          if (info.kind === "final") {
+          if (deliveryInfo.kind === "final") {
             await flushBufferedFinalAnswer();
           }
         },
-        onSkip: (payload, info) => {
+        onSkip: (payload, skipInfo) => {
           if (payload.isError === true) {
             hadErrorReplyFailureOrSkip = true;
           }
-          if (info.reason !== "silent") {
+          runtime.log?.(
+            `telegram-debug: dispatchTelegramMessage reply_skip chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} reason=${skipInfo.reason} kind=${skipInfo.kind}`,
+          );
+          if (skipInfo.reason !== "silent") {
             deliveryState.markNonSilentSkip();
           }
         },
-        onError: (err, info) => {
+        onError: (err, deliveryInfo) => {
           const errorPolicy = resolveTelegramErrorPolicy({
             accountConfig: telegramCfg,
             groupConfig,
@@ -756,7 +774,7 @@ export const dispatchTelegramMessage = async ({
             return;
           }
           deliveryState.markNonSilentFailure();
-          runtime.error?.(danger(`telegram ${info.kind} reply failed: ${String(err)}`));
+          runtime.error?.(danger(`telegram ${deliveryInfo.kind} reply failed: ${String(err)}`));
         },
       },
       replyOptions: {
@@ -830,6 +848,9 @@ export const dispatchTelegramMessage = async ({
       },
     }));
   } catch (err) {
+    runtime.log?.(
+      `telegram-debug: dispatchTelegramMessage dispatch_error chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} error=${JSON.stringify(String(err))}`,
+    );
     dispatchError = err;
     runtime.error?.(danger(`telegram dispatch failed: ${String(err)}`));
   } finally {
@@ -924,6 +945,9 @@ export const dispatchTelegramMessage = async ({
   }
 
   if (!hasFinalResponse) {
+    runtime.log?.(
+      `telegram-debug: dispatchTelegramMessage no_final_response chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} queuedFinal=${queuedFinal} sentFallback=${sentFallback} delivered=${deliverySummary.delivered} skippedNonSilent=${deliverySummary.skippedNonSilent} failedNonSilent=${deliverySummary.failedNonSilent}`,
+    );
     clearGroupHistory();
     return;
   }
@@ -966,6 +990,9 @@ export const dispatchTelegramMessage = async ({
     }
   }
 
+  runtime.log?.(
+    `telegram-debug: dispatchTelegramMessage success_final_response chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} queuedFinal=${queuedFinal} sentFallback=${sentFallback}`,
+  );
   if (statusReactionController) {
     void Promise.resolve(statusReactionController.setDone()).catch((err: unknown) => {
       logVerbose(`telegram: status reaction finalize failed: ${String(err)}`);

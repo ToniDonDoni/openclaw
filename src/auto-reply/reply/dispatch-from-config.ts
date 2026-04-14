@@ -10,6 +10,7 @@ import { parseSessionThreadInfoFast } from "../../config/sessions/thread-info.js
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { logVerbose } from "../../globals.js";
+import { info } from "openclaw/plugin-sdk/runtime-env";
 import { fireAndForgetHook } from "../../hooks/fire-and-forget.js";
 import {
   deriveInboundMessageHookContext,
@@ -202,6 +203,9 @@ export async function dispatchReplyFromConfig(
   params: DispatchFromConfigParams,
 ): Promise<DispatchFromConfigResult> {
   const { ctx, cfg, dispatcher } = params;
+  info(
+    `telegram-debug: dispatchReplyFromConfig enter sessionKey=${ctx.SessionKey ?? "none"} surface=${ctx.Surface ?? "none"} provider=${ctx.Provider ?? "none"} from=${ctx.From ?? "none"} to=${ctx.To ?? "none"} senderId=${ctx.SenderId ?? "none"} messageSid=${ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast ?? "none"}`,
+  );
   const diagnosticsEnabled = isDiagnosticsEnabled(cfg);
   const channel = normalizeLowercaseStringOrEmpty(ctx.Surface ?? ctx.Provider ?? "unknown");
   const chatId = ctx.To ?? ctx.From;
@@ -257,6 +261,9 @@ export async function dispatchReplyFromConfig(
 
   const inboundDedupeClaim = claimInboundDedupe(ctx);
   if (inboundDedupeClaim.status === "duplicate" || inboundDedupeClaim.status === "inflight") {
+    info(
+      `telegram-debug: dispatchReplyFromConfig dedupe_skip status=${inboundDedupeClaim.status} sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"} messageSid=${ctx.MessageSid ?? ctx.MessageSidFirst ?? ctx.MessageSidLast ?? "none"}`,
+    );
     recordProcessed("skipped", { reason: "duplicate" });
     return { queuedFinal: false, counts: dispatcher.getQueuedCounts() };
   }
@@ -458,6 +465,9 @@ export async function dispatchReplyFromConfig(
       // cannot rewind. Under deny, skip the plugin claim entirely and fall
       // through to normal (suppressed) agent processing so no delivery leaks
       // via the plugin path. See #53328.
+      info(
+        `telegram-debug: dispatchReplyFromConfig plugin_bound_skip_send_policy plugin=${pluginOwnedBinding.pluginId} sessionKey=${sessionKey ?? "unknown"}`,
+      );
       logVerbose(
         `plugin-bound inbound skipped under sendPolicy: deny (plugin=${pluginOwnedBinding.pluginId} session=${sessionKey ?? "unknown"}); falling through to suppressed agent processing`,
       );
@@ -483,6 +493,9 @@ export async function dispatchReplyFromConfig(
 
       switch (targetedClaimOutcome.status) {
         case "handled": {
+          info(
+            `telegram-debug: dispatchReplyFromConfig plugin_bound_handled plugin=${pluginOwnedBinding.pluginId} sessionKey=${sessionKey ?? "unknown"}`,
+          );
           markIdle("plugin_binding_dispatch");
           recordProcessed("completed", { reason: "plugin-bound-handled" });
           return { queuedFinal: false, counts: dispatcher.getQueuedCounts() };
@@ -509,6 +522,9 @@ export async function dispatchReplyFromConfig(
             { text: buildPluginBindingDeclinedText(pluginOwnedBinding) },
             "terminal",
           );
+          info(
+            `telegram-debug: dispatchReplyFromConfig plugin_bound_declined plugin=${pluginOwnedBinding.pluginId} sessionKey=${sessionKey ?? "unknown"}`,
+          );
           markIdle("plugin_binding_declined");
           recordProcessed("completed", { reason: "plugin-bound-declined" });
           return { queuedFinal: false, counts: dispatcher.getQueuedCounts() };
@@ -520,6 +536,9 @@ export async function dispatchReplyFromConfig(
           await sendBindingNotice(
             { text: buildPluginBindingErrorText(pluginOwnedBinding) },
             "terminal",
+          );
+          info(
+            `telegram-debug: dispatchReplyFromConfig plugin_bound_error plugin=${pluginOwnedBinding.pluginId} sessionKey=${sessionKey ?? "unknown"}`,
           );
           markIdle("plugin_binding_error");
           recordProcessed("completed", { reason: "plugin-bound-error" });
@@ -565,6 +584,9 @@ export async function dispatchReplyFromConfig(
     }
     const fastAbort = await fastAbortResolver({ ctx, cfg });
     if (fastAbort.handled) {
+      info(
+        `telegram-debug: dispatchReplyFromConfig fast_abort_handled sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"}`,
+      );
       let queuedFinal = false;
       let routedFinalCount = 0;
       if (!suppressDelivery) {
@@ -649,6 +671,9 @@ export async function dispatchReplyFromConfig(
         },
       );
       if (beforeDispatchResult?.handled) {
+        info(
+          `telegram-debug: dispatchReplyFromConfig before_dispatch_handled sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"}`,
+        );
         const text = beforeDispatchResult.text;
         let queuedFinal = false;
         let routedFinalCount = 0;
@@ -691,6 +716,9 @@ export async function dispatchReplyFromConfig(
         },
       );
       if (replyDispatchResult?.handled) {
+        info(
+          `telegram-debug: dispatchReplyFromConfig reply_dispatch_handled sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"}`,
+        );
         return {
           queuedFinal: replyDispatchResult.queuedFinal,
           counts: replyDispatchResult.counts,
@@ -999,6 +1027,9 @@ export async function dispatchReplyFromConfig(
     }
 
     const replies = replyResult ? (Array.isArray(replyResult) ? replyResult : [replyResult]) : [];
+    info(
+      `telegram-debug: dispatchReplyFromConfig reply_result sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"} replies=${replies.length}`,
+    );
 
     let queuedFinal = false;
     let routedFinalCount = 0;
@@ -1074,8 +1105,14 @@ export async function dispatchReplyFromConfig(
       pluginFallbackReason ? { reason: pluginFallbackReason } : undefined,
     );
     markIdle("message_completed");
+    info(
+      `telegram-debug: dispatchReplyFromConfig complete sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"} queuedFinal=${queuedFinal} finalCount=${counts.final} toolCount=${counts.tool} blockCount=${counts.block}`,
+    );
     return { queuedFinal, counts };
   } catch (err) {
+    info(
+      `telegram-debug: dispatchReplyFromConfig error sessionKey=${ctx.SessionKey ?? "none"} senderId=${ctx.SenderId ?? "none"} error=${JSON.stringify(String(err))}`,
+    );
     if (inboundDedupeClaim.status === "claimed") {
       releaseInboundDedupe(inboundDedupeClaim.key);
     }

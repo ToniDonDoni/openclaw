@@ -27,6 +27,7 @@ import {
   type HistoryEntry,
 } from "openclaw/plugin-sdk/reply-history";
 import type { MsgContext } from "openclaw/plugin-sdk/reply-runtime";
+import { info } from "openclaw/plugin-sdk/runtime-env";
 import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/text-runtime";
 import type { NormalizedAllowFrom } from "./bot-access.js";
@@ -120,6 +121,9 @@ export async function resolveTelegramInboundBody(params: {
     logger,
   } = params;
   const botUsername = normalizeOptionalLowercaseString(primaryCtx.me?.username);
+  info(
+    `telegram-debug: resolveTelegramInboundBody enter chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} isGroup=${isGroup} resolvedThreadId=${resolvedThreadId ?? "none"} dmThreadId=${params.dmThreadId ?? "none"} mediaCount=${allMedia.length} sessionKey=${sessionKey ?? "none"}`,
+  );
   const mentionRegexes = buildMentionRegexes(cfg, routeAgentId);
   const messageTextParts = getTelegramTextParts(msg);
   const allowForCommands = isGroup ? effectiveGroupAllow : effectiveDmAllow;
@@ -164,6 +168,9 @@ export async function resolveTelegramInboundBody(params: {
     rawBody = placeholder;
   }
   if (!rawBody && allMedia.length === 0) {
+    info(
+      `telegram-debug: resolveTelegramInboundBody drop_empty_body chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} hasPlaceholder=${Boolean(placeholder)} hasPrimaryMedia=${Boolean(primaryMedia)} stickerCacheHit=${stickerCacheHit}`,
+    );
     return null;
   }
 
@@ -238,6 +245,9 @@ export async function resolveTelegramInboundBody(params: {
   const wasMentioned = options?.forceWasMentioned === true ? true : computedWasMentioned;
 
   if (isGroup && commandGate.shouldBlock) {
+    info(
+      `telegram-debug: resolveTelegramInboundBody drop_command_unauthorized chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} hasControlCommand=${hasControlCommandInMessage} commandAuthorized=${commandAuthorized}`,
+    );
     logInboundDrop({
       log: logVerbose,
       channel: "telegram",
@@ -274,6 +284,9 @@ export async function resolveTelegramInboundBody(params: {
   });
   const effectiveWasMentioned = mentionDecision.effectiveWasMentioned;
   if (isGroup && requireMention && canDetectMention && mentionDecision.shouldSkip) {
+    info(
+      `telegram-debug: resolveTelegramInboundBody drop_no_mention chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} requireMention=${Boolean(requireMention)} canDetectMention=${canDetectMention} wasMentioned=${wasMentioned} effectiveWasMentioned=${effectiveWasMentioned}`,
+    );
     logger.info({ chatId, reason: "no-mention" }, "skipping group message");
     recordPendingHistoryEntryIfEnabled({
       historyMap: groupHistories,
@@ -333,6 +346,9 @@ export async function resolveTelegramInboundBody(params: {
     return null;
   }
 
+  info(
+    `telegram-debug: resolveTelegramInboundBody ready chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} bodyLength=${bodyText.length} rawLength=${rawBody.length} commandAuthorized=${commandAuthorized} effectiveWasMentioned=${effectiveWasMentioned} stickerCacheHit=${stickerCacheHit} canDetectMention=${canDetectMention} shouldBypassMention=${mentionDecision.shouldBypassMention}`,
+  );
   return {
     bodyText,
     rawBody,

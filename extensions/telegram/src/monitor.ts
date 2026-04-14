@@ -86,6 +86,7 @@ async function loadTelegramMonitorWebhookRuntime() {
 
 export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
   const log = opts.runtime?.error ?? console.error;
+  const runtimeLog = opts.runtime?.log ?? console.log;
   let pollingSession: TelegramPollingSessionInstance | undefined;
 
   const unregisterHandler = registerUnhandledRejectionHandler((err) => {
@@ -127,6 +128,9 @@ export async function monitorTelegramProvider(opts: MonitorTelegramOpts = {}) {
 
     const proxyFetch =
       opts.proxyFetch ?? (account.config.proxy ? makeProxyFetch(account.config.proxy) : undefined);
+    runtimeLog(
+      `telegram-debug: monitor_start accountId=${account.accountId} mode=${opts.useWebhook ? "webhook" : "polling"} hasAbortSignal=${Boolean(opts.abortSignal)} hasProxyFetch=${Boolean(proxyFetch)}`,
+    );
 
     if (opts.useWebhook) {
       const { startTelegramWebhook } = await loadTelegramMonitorWebhookRuntime();

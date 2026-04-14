@@ -414,6 +414,22 @@ describe("monitorTelegramProvider (grammY)", () => {
     );
   });
 
+  it("emits a startup telegram-debug log before polling begins", async () => {
+    const abort = new AbortController();
+    const runtime = {
+      log: vi.fn(),
+      error: vi.fn(),
+      exit: vi.fn(),
+    };
+    mockRunOnceAndAbort(abort);
+
+    await monitorTelegramProvider({ token: "tok", abortSignal: abort.signal, runtime });
+
+    expect(runtime.log).toHaveBeenCalledWith(
+      expect.stringContaining("telegram-debug: monitor_start accountId=default mode=polling"),
+    );
+  });
+
   it("requires mention in groups by default", async () => {
     for (const v of Object.values(api)) {
       if (typeof v === "function" && "mockReset" in v) {

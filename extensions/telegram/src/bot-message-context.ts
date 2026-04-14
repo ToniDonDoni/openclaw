@@ -7,7 +7,7 @@ import { logInboundDrop } from "openclaw/plugin-sdk/channel-inbound";
 import type { TelegramDirectConfig, TelegramGroupConfig } from "openclaw/plugin-sdk/config-runtime";
 import { deriveLastRoutePolicy } from "openclaw/plugin-sdk/routing";
 import { DEFAULT_ACCOUNT_ID, resolveThreadSessionKeys } from "openclaw/plugin-sdk/routing";
-import { logVerbose } from "openclaw/plugin-sdk/runtime-env";
+import { logVerbose, info } from "openclaw/plugin-sdk/runtime-env";
 import { withTelegramApiErrorLogging } from "./api-logging.js";
 import { firstDefined, normalizeAllowFrom, normalizeDmAllowFromWithStore } from "./bot-access.js";
 import { resolveTelegramInboundBody } from "./bot-message-context.body.js";
@@ -126,6 +126,9 @@ export const buildTelegramMessageContext = async ({
 }: BuildTelegramMessageContextParams): Promise<TelegramMessageContext | null> => {
   const msg = primaryCtx.message;
   const chatId = msg.chat.id;
+  info(
+    `telegram-debug: buildTelegramMessageContext enter chatId=${chatId} senderId=${msg.from?.id ?? "none"} messageId=${msg.message_id ?? "none"} chatType=${msg.chat.type} storeAllowFrom=${JSON.stringify(storeAllowFrom)} commandSource=${options?.commandSource ?? "none"}`,
+  );
   const isGroup = msg.chat.type === "group" || msg.chat.type === "supergroup";
   const senderId = msg.from?.id ? String(msg.from.id) : "";
   const messageThreadId = (msg as { message_thread_id?: number }).message_thread_id;
@@ -231,6 +234,9 @@ export const buildTelegramMessageContext = async ({
     senderId,
     topicAgentId: topicConfig?.agentId,
   });
+  info(
+    `telegram-debug: buildTelegramMessageContext route_resolved chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} resolvedThreadId=${resolvedThreadId ?? "none"} replyThreadId=${replyThreadId ?? "none"} routeAgentId=${route.agentId} routeAccountId=${route.accountId} matchedBy=${route.matchedBy} configuredBinding=${configuredBinding ? "yes" : "no"} configuredBindingSessionKey=${configuredBindingSessionKey || "none"}`,
+  );
   const requiresExplicitAccountBinding = (
     candidate: ReturnType<typeof resolveTelegramConversationRoute>["route"],
   ): boolean => candidate.accountId !== DEFAULT_ACCOUNT_ID && candidate.matchedBy === "default";
@@ -238,6 +244,9 @@ export const buildTelegramMessageContext = async ({
   // Named-account groups still require an explicit binding; DMs get a
   // per-account fallback session key below to preserve isolation.
   if (isNamedAccountFallback && isGroup) {
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_named_account_group chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} routeAccountId=${route.accountId} matchedBy=${route.matchedBy}`,
+    );
     logInboundDrop({
       log: logVerbose,
       channel: "telegram",
@@ -272,15 +281,24 @@ export const buildTelegramMessageContext = async ({
   });
   if (!baseAccess.allowed) {
     if (baseAccess.reason === "group-disabled") {
+      info(
+        `telegram-debug: buildTelegramMessageContext drop_group_disabled chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"}`,
+      );
       logVerbose(`Blocked telegram group ${chatId} (group disabled)`);
       return null;
     }
     if (baseAccess.reason === "topic-disabled") {
+      info(
+        `telegram-debug: buildTelegramMessageContext drop_topic_disabled chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} resolvedThreadId=${resolvedThreadId ?? "none"}`,
+      );
       logVerbose(
         `Blocked telegram topic ${chatId} (${resolvedThreadId ?? "unknown"}) (topic disabled)`,
       );
       return null;
     }
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_allow_override chatId=${chatId} senderId=${senderId || "none"} senderUsername=${senderUsername || "none"} messageId=${msg.message_id ?? "none"} isGroup=${isGroup} hasGroupAllowOverride=${hasGroupAllowOverride} effectiveGroupAllow=${JSON.stringify(effectiveGroupAllow)}`,
+    );
     logVerbose(
       isGroup
         ? `Blocked telegram group sender ${senderId || "unknown"} (group allowFrom override)`
@@ -292,6 +310,9 @@ export const buildTelegramMessageContext = async ({
   const requireTopic = directConfig?.requireTopic;
   const topicRequiredButMissing = !isGroup && requireTopic === true && dmThreadId == null;
   if (topicRequiredButMissing) {
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_require_topic chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"}`,
+    );
     logVerbose(`Blocked telegram DM ${chatId}: requireTopic=true but no topic present`);
     return null;
   }
@@ -337,6 +358,9 @@ export const buildTelegramMessageContext = async ({
       upsertPairingRequest,
     }))
   ) {
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_dm_access chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} dmPolicy=${effectiveDmPolicy} effectiveDmAllow=${JSON.stringify(effectiveDmAllow)}`,
+    );
     return null;
   }
   const ensureConfiguredBindingReady = async (): Promise<boolean> => {
@@ -381,6 +405,9 @@ export const buildTelegramMessageContext = async ({
       ? resolveThreadSessionKeys({ baseSessionKey, threadId: `${chatId}:${dmThreadId}` })
       : null;
   const sessionKey = threadKeys?.sessionKey ?? baseSessionKey;
+  info(
+    `telegram-debug: buildTelegramMessageContext session_resolved chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} baseSessionKey=${baseSessionKey} sessionKey=${sessionKey} dmThreadId=${dmThreadId ?? "none"}`,
+  );
   route = {
     ...route,
     sessionKey,
@@ -437,10 +464,20 @@ export const buildTelegramMessageContext = async ({
     logger,
   });
   if (!bodyResult) {
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_no_body chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} routeAgentId=${route.agentId} sessionKey=${sessionKey}`,
+    );
     return null;
   }
 
+  info(
+    `telegram-debug: buildTelegramMessageContext body_ready chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} sessionKey=${sessionKey} historyKey=${bodyResult.historyKey ?? "none"} effectiveWasMentioned=${bodyResult.effectiveWasMentioned}`,
+  );
+
   if (!(await ensureConfiguredBindingReady())) {
+    info(
+      `telegram-debug: buildTelegramMessageContext drop_binding_unready chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} sessionKey=${sessionKey}`,
+    );
     return null;
   }
 
@@ -582,6 +619,9 @@ export const buildTelegramMessageContext = async ({
     sessionRuntime,
   });
 
+  info(
+    `telegram-debug: buildTelegramMessageContext ready chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} sessionKey=${sessionKey} routeAgentId=${route.agentId} routeAccountId=${route.accountId} requireMention=${Boolean(requireMention)}`,
+  );
   return {
     ctxPayload,
     primaryCtx,

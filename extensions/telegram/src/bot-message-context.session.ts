@@ -17,6 +17,7 @@ import {
   type HistoryEntry,
 } from "openclaw/plugin-sdk/reply-history";
 import type { ResolvedAgentRoute } from "openclaw/plugin-sdk/routing";
+import { info } from "openclaw/plugin-sdk/runtime-env";
 import { logVerbose, shouldLogVerbose } from "openclaw/plugin-sdk/runtime-env";
 import { evaluateSupplementalContextVisibility } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalLowercaseString } from "openclaw/plugin-sdk/text-runtime";
@@ -156,6 +157,9 @@ export async function buildTelegramInboundContextPayload(params: {
   } = params;
   const replyTarget = describeReplyTarget(msg);
   const forwardOrigin = normalizeForwardedContext(msg);
+  info(
+    `telegram-debug: buildTelegramInboundContextPayload enter chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} isGroup=${isGroup} resolvedThreadId=${resolvedThreadId ?? "none"} dmThreadId=${dmThreadId ?? "none"} historyKey=${historyKey ?? "none"} routeSessionKey=${route.sessionKey}`,
+  );
   const contextVisibilityMode = resolveChannelContextVisibilityMode({
     cfg,
     channel: "telegram",
@@ -425,6 +429,9 @@ export async function buildTelegramInboundContextPayload(params: {
       logVerbose(`telegram: failed updating session meta: ${String(err)}`);
     },
   });
+  info(
+    `telegram-debug: buildTelegramInboundContextPayload ready chatId=${chatId} senderId=${senderId || "none"} messageId=${msg.message_id ?? "none"} sessionKey=${ctxPayload.SessionKey ?? "none"} bodyLength=${body.length} rawLength=${rawBody.length} includeReplyTarget=${Boolean(includeReplyTarget)} includeForwardOrigin=${Boolean(includeForwardOrigin)} stickerCacheHit=${stickerCacheHit}`,
+  );
 
   if (visibleReplyTarget && shouldLogVerbose()) {
     const preview = visibleReplyTarget.body.replace(/\s+/g, " ").slice(0, 120);

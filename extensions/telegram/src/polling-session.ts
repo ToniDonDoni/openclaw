@@ -92,22 +92,37 @@ export class TelegramPollingSession {
   }
 
   async runUntilAbort(): Promise<void> {
+    this.opts.runtime?.log?.(
+      `telegram-debug: polling_session_enter accountId=${this.opts.accountId} hasAbortSignal=${Boolean(this.opts.abortSignal)}`,
+    );
     while (!this.opts.abortSignal?.aborted) {
       const bot = await this.#createPollingBot();
       if (!bot) {
+        this.opts.runtime?.log?.(
+          `telegram-debug: polling_session_retry_create_bot accountId=${this.opts.accountId}`,
+        );
         continue;
       }
 
       const cleanupState = await this.#ensureWebhookCleanup(bot);
       if (cleanupState === "retry") {
+        this.opts.runtime?.log?.(
+          `telegram-debug: polling_session_webhook_cleanup_retry accountId=${this.opts.accountId}`,
+        );
         continue;
       }
       if (cleanupState === "exit") {
+        this.opts.runtime?.log?.(
+          `telegram-debug: polling_session_webhook_cleanup_exit accountId=${this.opts.accountId}`,
+        );
         return;
       }
 
       const state = await this.#runPollingCycle(bot);
       if (state === "exit") {
+        this.opts.runtime?.log?.(
+          `telegram-debug: polling_session_exit accountId=${this.opts.accountId} state=exit`,
+        );
         return;
       }
     }
@@ -117,6 +132,9 @@ export class TelegramPollingSession {
     this.#restartAttempts += 1;
     const delayMs = computeBackoff(TELEGRAM_POLL_RESTART_POLICY, this.#restartAttempts);
     const delay = formatDurationPrecise(delayMs);
+    this.opts.runtime?.log?.(
+      `telegram-debug: polling_session_restart_wait accountId=${this.opts.accountId} attempt=${this.#restartAttempts} delay=${delay}`,
+    );
     this.opts.log(buildLine(delay));
     try {
       await sleepWithAbort(delayMs, this.opts.abortSignal);
@@ -136,6 +154,9 @@ export class TelegramPollingSession {
     if (!isRecoverableTelegramNetworkError(err, { context: "unknown" })) {
       throw err;
     }
+    this.opts.runtime?.log?.(
+      `telegram-debug: polling_session_recoverable_setup_error accountId=${this.opts.accountId} error=${formatErrorMessage(err)}`,
+    );
     return this.#waitBeforeRestart(
       (delay) => `${logPrefix}: ${formatErrorMessage(err)}; retrying in ${delay}.`,
     );
@@ -145,6 +166,9 @@ export class TelegramPollingSession {
     const fetchAbortController = new AbortController();
     this.#activeFetchAbort = fetchAbortController;
     const telegramTransport = this.#transportState.acquireForNextCycle();
+    this.opts.runtime?.log?.(
+      `telegram-debug: polling_session_create_bot accountId=${this.opts.accountId} lastUpdateId=${this.opts.getLastUpdateId() ?? "none"} hasTransport=${Boolean(telegramTransport)}`,
+    );
     try {
       return createTelegramBot({
         token: this.opts.token,
@@ -170,6 +194,9 @@ export class TelegramPollingSession {
 
   async #ensureWebhookCleanup(bot: TelegramBot): Promise<"ready" | "retry" | "exit"> {
     if (this.#webhookCleared) {
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_session_webhook_already_cleared accountId=${this.opts.accountId}`,
+      );
       return "ready";
     }
     try {
@@ -179,6 +206,9 @@ export class TelegramPollingSession {
         fn: () => bot.api.deleteWebhook({ drop_pending_updates: false }),
       });
       this.#webhookCleared = true;
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_session_webhook_cleared accountId=${this.opts.accountId}`,
+      );
       return "ready";
     } catch (err) {
       const shouldRetry = await this.#waitBeforeRetryOnRecoverableSetupError(
@@ -192,9 +222,15 @@ export class TelegramPollingSession {
   async #confirmPersistedOffset(bot: TelegramBot): Promise<void> {
     const lastUpdateId = this.opts.getLastUpdateId();
     if (lastUpdateId === null || lastUpdateId >= Number.MAX_SAFE_INTEGER) {
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_session_skip_offset_confirm accountId=${this.opts.accountId} lastUpdateId=${lastUpdateId ?? "none"}`,
+      );
       return;
     }
     try {
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_session_confirm_offset accountId=${this.opts.accountId} lastUpdateId=${lastUpdateId}`,
+      );
       await bot.api.getUpdates({ offset: lastUpdateId + 1, limit: 1, timeout: 0 });
     } catch {
       // Non-fatal: runner middleware still skips duplicates via shouldSkipUpdate.
@@ -202,6 +238,7 @@ export class TelegramPollingSession {
   }
 
   async #runPollingCycle(bot: TelegramBot): Promise<"continue" | "exit"> {
+    this.opts.runtime?.log?.(`telegram-debug: polling_cycle_enter accountId=${this.opts.accountId}`);
     await this.#confirmPersistedOffset(bot);
 
     let lastGetUpdatesAt = Date.now();
@@ -258,6 +295,10 @@ export class TelegramPollingSession {
       inFlightGetUpdates += 1;
       lastGetUpdatesOutcome = "started";
       lastGetUpdatesError = null;
+      // do not spam logs
+      /*this.opts.runtime?.log?.(
+        `telegram-debug: polling_cycle_getUpdates_start accountId=${this.opts.accountId} offset=${lastGetUpdatesOffset ?? "none"} inFlight=${inFlightGetUpdates}`,
+      );*/
 
       try {
         const result = await prev(method, payload, signal);
@@ -280,6 +321,7 @@ export class TelegramPollingSession {
 
     const runner = run(bot, this.opts.runnerOptions);
     this.#activeRunner = runner;
+    this.opts.runtime?.log?.(`telegram-debug: polling_cycle_runner_started accountId=${this.opts.accountId}`);
     const fetchAbortController = this.#activeFetchAbort;
     const abortFetch = () => {
       fetchAbortController?.abort();
@@ -357,6 +399,9 @@ export class TelegramPollingSession {
         this.opts.log(
           `[telegram] Polling stall detected (${elapsedLabel}); forcing restart. [diag inFlight=${inFlightGetUpdates} outcome=${lastGetUpdatesOutcome} startedAt=${lastGetUpdatesStartedAt ?? "n/a"} finishedAt=${lastGetUpdatesFinishedAt ?? "n/a"} durationMs=${lastGetUpdatesDurationMs ?? "n/a"} offset=${lastGetUpdatesOffset ?? "n/a"}${lastGetUpdatesError ? ` error=${lastGetUpdatesError}` : ""}]`,
         );
+        this.opts.runtime?.log?.(
+          `telegram-debug: polling_cycle_stall_restart accountId=${this.opts.accountId} inFlight=${inFlightGetUpdates} outcome=${lastGetUpdatesOutcome} offset=${lastGetUpdatesOffset ?? "none"}`,
+        );
         void stopRunner();
         void stopBot();
         if (!forceCycleTimer) {
@@ -385,6 +430,9 @@ export class TelegramPollingSession {
           ? "unhandled network error"
           : "runner stopped (maxRetryTime exceeded or graceful stop)";
       this.#forceRestarted = false;
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_cycle_complete accountId=${this.opts.accountId} reason=${reason} outcome=${lastGetUpdatesOutcome} offset=${lastGetUpdatesOffset ?? "none"}`,
+      );
       this.opts.log(
         `[telegram][diag] polling cycle finished reason=${reason} inFlight=${inFlightGetUpdates} outcome=${lastGetUpdatesOutcome} startedAt=${lastGetUpdatesStartedAt ?? "n/a"} finishedAt=${lastGetUpdatesFinishedAt ?? "n/a"} durationMs=${lastGetUpdatesDurationMs ?? "n/a"} offset=${lastGetUpdatesOffset ?? "n/a"}${lastGetUpdatesError ? ` error=${String(lastGetUpdatesError)}` : ""}`,
       );
@@ -410,6 +458,9 @@ export class TelegramPollingSession {
       }
       const reason = isConflict ? "getUpdates conflict" : "network error";
       const errMsg = formatErrorMessage(err);
+      this.opts.runtime?.log?.(
+        `telegram-debug: polling_cycle_error accountId=${this.opts.accountId} reason=${reason} outcome=${lastGetUpdatesOutcome} offset=${lastGetUpdatesOffset ?? "none"} error=${errMsg}`,
+      );
       this.opts.log(
         `[telegram][diag] polling cycle error reason=${reason} inFlight=${inFlightGetUpdates} outcome=${lastGetUpdatesOutcome} startedAt=${lastGetUpdatesStartedAt ?? "n/a"} finishedAt=${lastGetUpdatesFinishedAt ?? "n/a"} durationMs=${lastGetUpdatesDurationMs ?? "n/a"} offset=${lastGetUpdatesOffset ?? "n/a"} err=${errMsg}${lastGetUpdatesError ? ` lastGetUpdatesError=${String(lastGetUpdatesError)}` : ""}`,
       );

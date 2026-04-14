@@ -260,6 +260,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
   const activeHandledUpdateKeys = new Map<string, boolean>();
   const initialUpdateId =
     typeof opts.updateOffset?.lastUpdateId === "number" ? opts.updateOffset.lastUpdateId : null;
+  runtime.log?.(
+    `telegram-debug: createTelegramBot accountId=${account.accountId} updateOffset=${initialUpdateId ?? "none"} hasFetchAbortSignal=${Boolean(opts.fetchAbortSignal)}`,
+  );
 
   // Track update_ids that have entered the middleware pipeline but have not completed yet.
   // This includes updates that are "queued" behind sequentialize(...) for a chat/topic key.
@@ -303,6 +306,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
       return;
     }
     highestPersistedUpdateId = safe;
+    runtime.log?.(
+      `telegram-debug: update_watermark_persisted accountId=${account.accountId} updateId=${safe} highestCompleted=${highestCompletedUpdateId ?? "none"} pending=${pendingUpdateIds.size} failed=${failedUpdateIds.size}`,
+    );
     void Promise.resolve()
       .then(() => opts.updateOffset?.onUpdateId?.(safe))
       .catch((err) => {
@@ -311,6 +317,7 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
   };
 
   const logSkippedUpdate = (key: string) => {
+    runtime.log?.(`telegram-debug: update_dedupe_skip key=${key}`);
     if (shouldLogVerbose()) {
       logVerbose(`telegram dedupe: skipped ${key}`);
     }
@@ -320,6 +327,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
     const updateId = resolveTelegramUpdateId(ctx);
     const skipCutoff = highestPersistedUpdateId ?? initialUpdateId;
     if (typeof updateId === "number" && skipCutoff !== null && updateId <= skipCutoff) {
+      runtime.log?.(
+        `telegram-debug: update_skip_cutoff updateId=${updateId} cutoff=${skipCutoff}`,
+      );
       return true;
     }
     const key = buildTelegramUpdateKey(ctx);
@@ -345,6 +355,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
   bot.use(async (ctx, next) => {
     const updateId = resolveTelegramUpdateId(ctx);
     const updateKey = buildTelegramUpdateKey(ctx);
+    runtime.log?.(
+      `telegram-debug: update_middleware_enter updateId=${updateId ?? "none"} updateKey=${updateKey ?? "none"}`,
+    );
     let completed = false;
     if (typeof updateId === "number") {
       failedUpdateIds.delete(updateId);
@@ -356,6 +369,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
         if (typeof updateId === "number") {
           pendingUpdateIds.delete(updateId);
         }
+        runtime.log?.(
+          `telegram-debug: update_middleware_drop_duplicate updateId=${updateId ?? "none"} updateKey=${updateKey}`,
+        );
         return;
       }
       pendingUpdateKeys.add(updateKey);
@@ -364,6 +380,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
     try {
       await next();
       completed = true;
+      runtime.log?.(
+        `telegram-debug: update_middleware_next_complete updateId=${updateId ?? "none"} updateKey=${updateKey ?? "none"}`,
+      );
     } finally {
       if (updateKey) {
         activeHandledUpdateKeys.delete(updateKey);
@@ -383,6 +402,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
           failedUpdateIds.add(updateId);
         }
       }
+      runtime.log?.(
+        `telegram-debug: update_middleware_exit updateId=${updateId ?? "none"} updateKey=${updateKey ?? "none"} completed=${completed} highestCompletedUpdateId=${highestCompletedUpdateId ?? "none"} highestPersistedUpdateId=${highestPersistedUpdateId ?? "none"}`,
+      );
     }
   });
 
@@ -415,15 +437,27 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
   };
 
   bot.use(async (ctx, next) => {
-    if (shouldLogVerbose()) {
-      try {
-        const raw = stringifyUpdate(ctx.update);
-        const preview =
-          raw.length > MAX_RAW_UPDATE_CHARS ? `${raw.slice(0, MAX_RAW_UPDATE_CHARS)}...` : raw;
+    try {
+      const raw = stringifyUpdate(ctx.update);
+      const preview =
+        raw.length > MAX_RAW_UPDATE_CHARS ? `${raw.slice(0, MAX_RAW_UPDATE_CHARS)}...` : raw;
+      if (shouldLogVerbose()) {
         rawUpdateLogger.debug(`telegram update: ${preview}`);
-      } catch (err) {
-        rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
       }
+      const updateId =
+        typeof (ctx.update as { update_id?: unknown } | undefined)?.update_id === "number"
+          ? ((ctx.update as { update_id?: number }).update_id ?? undefined)
+          : undefined;
+      const message = (ctx.update as { message?: { chat?: { id?: unknown }; from?: { id?: unknown }; message_id?: unknown; text?: unknown } } | undefined)?.message;
+      const chatId = typeof message?.chat?.id === "number" ? message.chat.id : undefined;
+      const senderId = typeof message?.from?.id === "number" ? message.from.id : undefined;
+      const messageId = typeof message?.message_id === "number" ? message.message_id : undefined;
+      const text = typeof message?.text === "string" ? message.text : undefined;
+      runtime.log?.(
+        `telegram-debug: raw_update_seen updateId=${updateId ?? "none"} chatId=${chatId ?? "none"} senderId=${senderId ?? "none"} messageId=${messageId ?? "none"} text=${JSON.stringify(text ?? "")}`,
+      );
+    } catch (err) {
+      rawUpdateLogger.debug(`telegram update log failed: ${String(err)}`);
     }
     await next();
   });
@@ -600,6 +634,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
     opts,
     telegramDeps,
   });
+  runtime.log?.(
+    `telegram-debug: bot_registered_native_commands accountId=${account.accountId} nativeEnabled=${nativeEnabled} nativeSkillsEnabled=${nativeSkillsEnabled} nativeDisabledExplicit=${nativeDisabledExplicit}`,
+  );
 
   registerTelegramHandlers({
     cfg,
@@ -619,6 +656,9 @@ export function createTelegramBot(opts: TelegramBotOptions): TelegramBotInstance
     logger,
     telegramDeps,
   });
+  runtime.log?.(
+    `telegram-debug: bot_registered_handlers accountId=${account.accountId} historyLimit=${historyLimit} textLimit=${textLimit} streamMode=${streamMode} dmPolicy=${dmPolicy}`,
+  );
 
   const originalStop = bot.stop.bind(bot);
   bot.stop = ((...args: Parameters<typeof originalStop>) => {
