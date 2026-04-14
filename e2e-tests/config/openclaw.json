@@ -1,0 +1,90 @@
+{
+  "meta": {
+    "lastTouchedVersion": "2026.4.9",
+    "lastTouchedAt": "2026-04-08T21:22:28.408Z"
+  },
+  "logging": {
+    "level": "trace",
+    "consoleLevel": "trace"
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "openai-codex/gpt-5.4"
+      },
+      "models": {
+        "openai-codex/gpt-5.4": {}
+      },
+      "workspace": "/work/e2e-openclaw/workspace",
+      "heartbeat": {
+        "every": "0m"
+      }
+    }
+  },
+  "commands": {
+    "native": "auto",
+    "nativeSkills": "auto",
+    "restart": true,
+    "ownerDisplay": "raw"
+  },
+  "channels": {
+    "telegram": {
+      "enabled": true,
+      "dmPolicy": "allowlist",
+      "allowFrom": [
+        "900000001"
+      ],
+      "groupPolicy": "disabled",
+      "streaming": {
+        "mode": "partial"
+      },
+      "accounts": {
+        "default": {
+          "dmPolicy": "pairing",
+          "botToken": "TEST:TOKEN",
+          "apiRoot": "http://127.0.0.1:19001",
+          "groupPolicy": "allowlist",
+          "streaming": {
+            "mode": "partial"
+          }
+        }
+      },
+      "defaultAccount": "default"
+    }
+  },
+  "gateway": {
+    "mode": "local",
+    "controlUi": {
+      "enabled": false,
+      "allowedOrigins": [
+        "http://localhost:18789",
+        "http://127.0.0.1:18789"
+      ]
+    },
+    "auth": {
+      "mode": "token",
+      "token": "TEST-GATEWAY-TOKEN"
+    }
+  },
+  "plugins": {
+    "entries": {
+      "telegram": {
+        "enabled": true,
+        "config": {}
+      },
+      "openai": {
+        "enabled": true
+      },
+      "acpx": {
+        "enabled": false
+      },
+      "self-check-gate": {
+        "enabled": true,
+        "config": {}
+      }
+    }
+  },
+  "acp": {
+    "enabled": false
+  }
+}
