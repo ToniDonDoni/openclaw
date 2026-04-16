@@ -48,7 +48,7 @@ The script will:
 - send one message into tg-mock
 - wait for a reply from OpenClaw
 - print the result to stdout
-- exit with `0` on pass and `1` on fail
+- exits `0` on pass and `1` on fail
 
 Important timing rule:
 
@@ -73,3 +73,4 @@ Important timing rule:
 
 - OpenClaw: `./logs/openclaw.log`
 - tg-mock: `./logs/tg-mock.log`
+- test script: `./logs/test-telegram-mock-openclaw.log`

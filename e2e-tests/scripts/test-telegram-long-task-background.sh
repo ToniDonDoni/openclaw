@@ -23,8 +23,8 @@ STAND_DIR="$(cd "$BASE_DIR/.." && pwd)"
 LOG_DIR="$STAND_DIR/logs"
 OPENCLAW_LOG="$LOG_DIR/openclaw.log"
 TG_LOG="$LOG_DIR/tg-mock.log"
-TEST_DONE_SLEEP_SEC="${TEST_DONE_SLEEP_SEC:-20}"
-MSG="${1:-Run /tmp/done with a 60 second timeout. It is likely to run about 10 seconds. Wait until it finishes. Reply only with its output exactly.}"
+TEST_DONE_SLEEP_SEC="${TEST_DONE_SLEEP_SEC:-45}"
+MSG="${1:-Start /tmp/done with a 60 second timeout. It is likely to run about 10 seconds. You may return once it has started, but I still need the exact command output when it finishes.}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
 MIN_REPLY_MS="${MIN_REPLY_MS:-$((TEST_DONE_SLEEP_SEC * 1000))}"
 TG_MOCK_API_ROOT="${TG_MOCK_API_ROOT:-http://127.0.0.1:19001}"
@@ -81,25 +81,33 @@ const textOf = (update) =>
 
 const startedAt = Number.isFinite(sentAtMs) && sentAtMs > 0 ? sentAtMs : Date.now();
 let lastPoll = null;
+const loggedInterimBotTexts = new Set();
 
 while (Date.now() - startedAt < timeoutMs) {
   const history = await post("/getUpdatesHistory", { token });
   const updates = Array.isArray(history.json?.result) ? history.json.result : [];
 
   let userIndex = -1;
-  let firstBotIndex = -1;
-  let firstBotText = null;
+  let doneBotIndex = -1;
+  let doneBotText = null;
   const userTexts = [];
   const botTexts = [];
+  const botTextsAfterUser = [];
 
   for (let index = 0; index < updates.length; index += 1) {
     const update = updates[index];
     const text = textOf(update);
     if (hasChatId(update)) {
       botTexts.push(text);
-      if (userIndex !== -1 && index > userIndex && firstBotIndex === -1) {
-        firstBotIndex = index;
-        firstBotText = text;
+      if (userIndex !== -1 && index > userIndex && typeof text === "string") {
+        botTextsAfterUser.push(text);
+        if (/^done\s+\d+$/u.test(text.trim()) && doneBotIndex === -1) {
+          doneBotIndex = index;
+          doneBotText = text;
+        } else if (text.trim() && !loggedInterimBotTexts.has(text)) {
+          loggedInterimBotTexts.add(text);
+          console.log(`interim_bot_output output=${JSON.stringify(text.trim())} elapsedMs=${Date.now() - startedAt}`);
+        }
       }
       continue;
     }
@@ -109,17 +117,18 @@ while (Date.now() - startedAt < timeoutMs) {
     }
   }
 
-  const matched = userIndex !== -1 && firstBotIndex > userIndex;
+  const matched = userIndex !== -1 && doneBotIndex > userIndex;
   lastPoll = {
     elapsedMs: Date.now() - startedAt,
     count: updates.length,
     expectedUserText,
     userIndex,
-    firstBotIndex,
-    firstBotText,
+    doneBotIndex,
+    doneBotText,
     matched,
     userTexts,
     botTexts,
+    botTextsAfterUser,
     snapshot: updates.map((update) => ({
       updateId: update?.updateId ?? null,
       messageId: update?.messageId ?? null,
@@ -131,13 +140,13 @@ while (Date.now() - startedAt < timeoutMs) {
   };
 
   if (matched) {
-    if (typeof firstBotText !== "string" || !firstBotText.trim()) {
+    if (typeof doneBotText !== "string" || !doneBotText.trim()) {
       console.error(
         `empty_bot_output elapsedMs=${Date.now() - startedAt} minReplyMs=${minReplyMs}`,
       );
       process.exit(2);
     }
-    const trimmedOutput = firstBotText.trim();
+    const trimmedOutput = doneBotText.trim();
     const outputMatch = /^done\s+(\d+)$/u.exec(trimmedOutput);
     if (!outputMatch) {
       console.error(
@@ -174,7 +183,7 @@ log "inject_message text=$MSG"
 TEST_SENT_AT_MS="$(node -e 'process.stdout.write(String(Date.now()))')"
 node "$BASE_DIR/tg-mock-client.mjs" "$MSG"
 
-log "wait_for_reply expected_user_text=$MSG min_reply_ms=$MIN_REPLY_MS"
+log "wait_for_background_completion expected_user_text=$MSG min_reply_ms=$MIN_REPLY_MS"
 if wait_for_reply; then
   log "test_pass expected_user_text=$MSG min_reply_ms=$MIN_REPLY_MS"
   printf 'PASS\n'
@@ -182,7 +191,7 @@ if wait_for_reply; then
 else
   status=$?
   log "test_fail status=$status expected_user_text=$MSG min_reply_ms=$MIN_REPLY_MS"
-  log "expected bot reply to be exact /tmp/done output matching 'done <unix_seconds>' with output timestamp at least ${MIN_REPLY_MS}ms after test send timestamp"
+  log "expected eventual bot reply to be exact /tmp/done output matching 'done <unix_seconds>' with output timestamp at least ${MIN_REPLY_MS}ms after test send timestamp; interim bot replies are allowed"
   log "tg_mock_history_snapshot_begin"
   node "$BASE_DIR/tg-mock-history.mjs" || true
   log "tg_mock_history_snapshot_end"

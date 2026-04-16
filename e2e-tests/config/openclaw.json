@@ -31,9 +31,7 @@
     "telegram": {
       "enabled": true,
       "dmPolicy": "allowlist",
-      "allowFrom": [
-        "900000001"
-      ],
+      "allowFrom": ["900000001"],
       "groupPolicy": "disabled",
       "streaming": {
         "mode": "partial"
@@ -56,10 +54,7 @@
     "mode": "local",
     "controlUi": {
       "enabled": false,
-      "allowedOrigins": [
-        "http://localhost:18789",
-        "http://127.0.0.1:18789"
-      ]
+      "allowedOrigins": ["http://localhost:18789", "http://127.0.0.1:18789"]
     },
     "auth": {
       "mode": "token",
@@ -86,5 +81,20 @@
   },
   "acp": {
     "enabled": false
+  },
+  "models": {
+    "providers": {
+      "openai-codex": {
+        "api": "openai-codex-responses",
+        "baseUrl": "https://chatgpt.com/backend-api",
+        "models": [
+          {
+            "id": "gpt-5.4",
+            "name": "gpt-5.4",
+            "api": "openai-codex-responses"
+          }
+        ]
+      }
+    }
   }
 }

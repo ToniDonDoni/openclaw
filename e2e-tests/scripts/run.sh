@@ -40,6 +40,32 @@ if [ -L "$LATEST_PID_LINK" ] || [ -f "$LATEST_PID_LINK" ]; then
 fi
 
 if [ "$CLEAN" -eq 1 ]; then
+  if [ -z "$ROOT_DIR" ] || [ "$ROOT_DIR" = "/" ]; then
+    echo "refusing to clean invalid ROOT_DIR=$ROOT_DIR" >&2
+    exit 1
+  fi
+  if [ -z "$STATE_DIR" ] || [ "$STATE_DIR" = "/" ]; then
+    echo "refusing to clean invalid STATE_DIR=$STATE_DIR" >&2
+    exit 1
+  fi
+  AUTH_BACKUP_DIR="$(mktemp -d "$STATE_DIR/.auth-profiles.XXXXXX")"
+  find "$STATE_DIR/agents" -path '*/agent/auth-profiles.json' -type f -print0 2>/dev/null |
+    while IFS= read -r -d '' auth_file; do
+      rel_path="${auth_file#"$STATE_DIR/agents/"}"
+      mkdir -p "$AUTH_BACKUP_DIR/$(dirname "$rel_path")"
+      cp "$auth_file" "$AUTH_BACKUP_DIR/$rel_path"
+    done
+  rm -rf "$STATE_DIR/agents" "$STATE_DIR/tasks" "$ROOT_DIR/workspace/.openclaw"
+  if [ -d "$AUTH_BACKUP_DIR" ]; then
+    find "$AUTH_BACKUP_DIR" -path '*/agent/auth-profiles.json' -type f -print0 |
+      while IFS= read -r -d '' auth_file; do
+        rel_path="${auth_file#"$AUTH_BACKUP_DIR/"}"
+        mkdir -p "$STATE_DIR/agents/$(dirname "$rel_path")"
+        cp "$auth_file" "$STATE_DIR/agents/$rel_path"
+        chmod 600 "$STATE_DIR/agents/$rel_path"
+      done
+    rm -rf "$AUTH_BACKUP_DIR"
+  fi
   rm -f "$STATE_DIR/telegram/update-offset-default.json"
   rm -f "$STATE_DIR/telegram/command-hash-default-"*.txt 2>/dev/null || true
   echo "cleaned openclaw test state"
