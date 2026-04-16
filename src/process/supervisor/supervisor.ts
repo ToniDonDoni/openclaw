@@ -3,6 +3,7 @@ import { getShellConfig } from "../../agents/shell-utils.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { createChildAdapter } from "./adapters/child.js";
 import { createPtyAdapter } from "./adapters/pty.js";
+import { logExecRuntimeLifecycle } from "./lifecycle-log.runtime.js";
 import { createRunRegistry } from "./registry.js";
 import type {
   ManagedRun,
@@ -16,6 +17,12 @@ import type {
 type ActiveRun = {
   run: ManagedRun;
   scopeKey?: string;
+  sessionId: string;
+  backendId: string;
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+  noOutputTimeoutMs?: number;
 };
 
 function clampTimeout(value?: number): number | undefined {
@@ -29,6 +36,10 @@ function isTimeoutReason(reason: TerminationReason) {
   return reason === "overall-timeout" || reason === "no-output-timeout";
 }
 
+function describeSpawnCommand(input: SpawnInput): string {
+  return input.mode === "pty" ? input.ptyCommand : input.argv.join(" ");
+}
+
 export function createProcessSupervisor(): ProcessSupervisor {
   const registry = createRunRegistry();
   const active = new Map<string, ActiveRun>();
@@ -36,8 +47,25 @@ export function createProcessSupervisor(): ProcessSupervisor {
   const cancel = (runId: string, reason: TerminationReason = "manual-cancel") => {
     const current = active.get(runId);
     if (!current) {
+      logExecRuntimeLifecycle("supervisor-cancel-miss", {
+        runId,
+        reason,
+        action: "cancel",
+      });
       return;
     }
+    logExecRuntimeLifecycle("supervisor-cancel-request", {
+      runId,
+      sessionId: current.sessionId,
+      pid: current.run.pid,
+      command: current.command,
+      cwd: current.cwd,
+      timeoutMs: current.timeoutMs,
+      noOutputTimeoutMs: current.noOutputTimeoutMs,
+      reason,
+      timedOut: isTimeoutReason(reason),
+      action: "cancel",
+    });
     registry.updateState(runId, "exiting", {
       terminationReason: reason,
     });
@@ -48,6 +76,12 @@ export function createProcessSupervisor(): ProcessSupervisor {
     if (!scopeKey.trim()) {
       return;
     }
+    logExecRuntimeLifecycle("supervisor-cancel-scope", {
+      scopeKey,
+      reason,
+      action: "cancelScope",
+      timedOut: isTimeoutReason(reason),
+    });
     for (const [runId, run] of active.entries()) {
       if (run.scopeKey !== scopeKey) {
         continue;
@@ -86,6 +120,20 @@ export function createProcessSupervisor(): ProcessSupervisor {
 
     const overallTimeoutMs = clampTimeout(input.timeoutMs);
     const noOutputTimeoutMs = clampTimeout(input.noOutputTimeoutMs);
+    const command = describeSpawnCommand(input);
+
+    logExecRuntimeLifecycle("supervisor-spawn-request", {
+      runId,
+      sessionId: input.sessionId,
+      backendId: input.backendId,
+      command,
+      cwd: input.cwd,
+      timeoutMs: overallTimeoutMs,
+      noOutputTimeoutMs,
+      mode: input.mode,
+      replaceExistingScope: input.replaceExistingScope === true,
+      timedOut: false,
+    });
 
     const setForcedReason = (reason: TerminationReason) => {
       if (forcedReason) {
@@ -98,6 +146,17 @@ export function createProcessSupervisor(): ProcessSupervisor {
     let cancelAdapter: ((reason: TerminationReason) => void) | null = null;
 
     const requestCancel = (reason: TerminationReason) => {
+      logExecRuntimeLifecycle("supervisor-cancel-dispatch", {
+        runId,
+        sessionId: input.sessionId,
+        command,
+        cwd: input.cwd,
+        timeoutMs: overallTimeoutMs,
+        noOutputTimeoutMs,
+        reason,
+        timedOut: isTimeoutReason(reason),
+        action: "requestCancel",
+      });
       setForcedReason(reason);
       cancelAdapter?.(reason);
     };
@@ -132,6 +191,16 @@ export function createProcessSupervisor(): ProcessSupervisor {
                 args: [...shellArgs, ptyCommand],
                 cwd: input.cwd,
                 env: input.env,
+                logContext: {
+                  runId,
+                  sessionId: input.sessionId,
+                  backendId: input.backendId,
+                  command,
+                  cwd: input.cwd,
+                  timeoutMs: overallTimeoutMs,
+                  noOutputTimeoutMs,
+                  mode: input.mode,
+                },
               });
             })()
           : await createChildAdapter({
@@ -141,9 +210,31 @@ export function createProcessSupervisor(): ProcessSupervisor {
               windowsVerbatimArguments: input.windowsVerbatimArguments,
               input: input.input,
               stdinMode: input.stdinMode,
+              logContext: {
+                runId,
+                sessionId: input.sessionId,
+                backendId: input.backendId,
+                command,
+                cwd: input.cwd,
+                timeoutMs: overallTimeoutMs,
+                noOutputTimeoutMs,
+                mode: input.mode,
+              },
             });
 
       registry.updateState(runId, "running", { pid: adapter.pid });
+      logExecRuntimeLifecycle("supervisor-running", {
+        runId,
+        sessionId: input.sessionId,
+        backendId: input.backendId,
+        pid: adapter.pid,
+        command,
+        cwd: input.cwd,
+        timeoutMs: overallTimeoutMs,
+        noOutputTimeoutMs,
+        mode: input.mode,
+        timedOut: false,
+      });
 
       const clearTimers = () => {
         if (timeoutTimer) {
@@ -158,18 +249,77 @@ export function createProcessSupervisor(): ProcessSupervisor {
 
       cancelAdapter = (_reason: TerminationReason) => {
         if (settled) {
+          logExecRuntimeLifecycle("supervisor-kill-skip-settled", {
+            runId,
+            sessionId: input.sessionId,
+            pid: adapter.pid,
+            command,
+            cwd: input.cwd,
+            reason: _reason,
+            timedOut: isTimeoutReason(_reason),
+            action: "kill",
+          });
           return;
         }
+        logExecRuntimeLifecycle("supervisor-kill-adapter", {
+          runId,
+          sessionId: input.sessionId,
+          pid: adapter.pid,
+          command,
+          cwd: input.cwd,
+          reason: _reason,
+          signal: "SIGKILL",
+          timedOut: isTimeoutReason(_reason),
+          action: "kill",
+        });
         adapter.kill("SIGKILL");
       };
 
       if (overallTimeoutMs) {
+        logExecRuntimeLifecycle("supervisor-overall-timeout-start", {
+          runId,
+          sessionId: input.sessionId,
+          pid: adapter.pid,
+          command,
+          cwd: input.cwd,
+          timeoutMs: overallTimeoutMs,
+          timedOut: false,
+        });
         timeoutTimer = setTimeout(() => {
+          logExecRuntimeLifecycle("supervisor-overall-timeout-fired", {
+            runId,
+            sessionId: input.sessionId,
+            pid: adapter.pid,
+            command,
+            cwd: input.cwd,
+            timeoutMs: overallTimeoutMs,
+            reason: "overall-timeout",
+            timedOut: true,
+          });
           requestCancel("overall-timeout");
         }, overallTimeoutMs);
       }
       if (noOutputTimeoutMs) {
+        logExecRuntimeLifecycle("supervisor-no-output-timeout-start", {
+          runId,
+          sessionId: input.sessionId,
+          pid: adapter.pid,
+          command,
+          cwd: input.cwd,
+          noOutputTimeoutMs,
+          timedOut: false,
+        });
         noOutputTimer = setTimeout(() => {
+          logExecRuntimeLifecycle("supervisor-no-output-timeout-fired", {
+            runId,
+            sessionId: input.sessionId,
+            pid: adapter.pid,
+            command,
+            cwd: input.cwd,
+            noOutputTimeoutMs,
+            reason: "no-output-timeout",
+            timedOut: true,
+          });
           requestCancel("no-output-timeout");
         }, noOutputTimeoutMs);
       }
@@ -225,6 +375,20 @@ export function createProcessSupervisor(): ProcessSupervisor {
           exitCode: exit.exitCode,
           exitSignal: exit.exitSignal,
         });
+        logExecRuntimeLifecycle("supervisor-exit", {
+          runId,
+          sessionId: input.sessionId,
+          pid: adapter.pid,
+          command,
+          cwd: input.cwd,
+          timeoutMs: overallTimeoutMs,
+          noOutputTimeoutMs,
+          reason: exit.reason,
+          exitCode: exit.exitCode,
+          exitSignal: exit.exitSignal,
+          timedOut: exit.timedOut,
+          noOutputTimedOut: exit.noOutputTimedOut,
+        });
         return exit;
       })().catch((err) => {
         if (!settled) {
@@ -237,6 +401,17 @@ export function createProcessSupervisor(): ProcessSupervisor {
             exitCode: null,
             exitSignal: null,
           });
+          logExecRuntimeLifecycle("supervisor-wait-error", {
+            runId,
+            sessionId: input.sessionId,
+            pid: adapter.pid,
+            command,
+            cwd: input.cwd,
+            reason: String(err),
+            exitCode: null,
+            exitSignal: null,
+            timedOut: false,
+          });
         }
         throw err;
       });
@@ -248,6 +423,16 @@ export function createProcessSupervisor(): ProcessSupervisor {
         stdin: adapter.stdin,
         wait: async () => await waitPromise,
         cancel: (reason = "manual-cancel") => {
+          logExecRuntimeLifecycle("supervisor-managed-run-cancel", {
+            runId,
+            sessionId: input.sessionId,
+            pid: adapter.pid,
+            command,
+            cwd: input.cwd,
+            reason,
+            timedOut: isTimeoutReason(reason),
+            action: "cancel",
+          });
           requestCancel(reason);
         },
       };
@@ -255,6 +440,12 @@ export function createProcessSupervisor(): ProcessSupervisor {
       active.set(runId, {
         run: managedRun,
         scopeKey,
+        sessionId: input.sessionId,
+        backendId: input.backendId,
+        command,
+        cwd: input.cwd,
+        timeoutMs: overallTimeoutMs,
+        noOutputTimeoutMs,
       });
       return managedRun;
     } catch (err) {
@@ -262,6 +453,20 @@ export function createProcessSupervisor(): ProcessSupervisor {
         reason: "spawn-error",
         exitCode: null,
         exitSignal: null,
+      });
+      logExecRuntimeLifecycle("supervisor-spawn-error", {
+        runId,
+        sessionId: input.sessionId,
+        backendId: input.backendId,
+        command,
+        cwd: input.cwd,
+        timeoutMs: overallTimeoutMs,
+        noOutputTimeoutMs,
+        mode: input.mode,
+        reason: String(err),
+        exitCode: null,
+        exitSignal: null,
+        timedOut: false,
       });
       const { warnProcessSupervisorSpawnFailure } = await import("./supervisor-log.runtime.js");
       warnProcessSupervisorSpawnFailure(`spawn failed: runId=${runId} reason=${String(err)}`);

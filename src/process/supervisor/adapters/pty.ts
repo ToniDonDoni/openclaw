@@ -1,4 +1,8 @@
 import { killProcessTree } from "../../kill-tree.js";
+import {
+  type ExecLifecycleFields,
+  logExecRuntimeLifecycle,
+} from "../lifecycle-log.runtime.js";
 import type { ManagedRunStdin, SpawnProcessAdapter } from "../types.js";
 import { toStringEnv } from "./env.js";
 
@@ -42,6 +46,7 @@ export async function createPtyAdapter(params: {
   cols?: number;
   rows?: number;
   name?: string;
+  logContext?: ExecLifecycleFields;
 }): Promise<PtyAdapter> {
   const module = (await import("@lydell/node-pty")) as unknown as PtyModule;
   const spawn = module.spawn ?? module.default?.spawn;
@@ -54,6 +59,13 @@ export async function createPtyAdapter(params: {
     name: params.name ?? process.env.TERM ?? "xterm-256color",
     cols: params.cols ?? 120,
     rows: params.rows ?? 30,
+  });
+  logExecRuntimeLifecycle("adapter-pty-started", {
+    ...params.logContext,
+    pid: pty.pid || null,
+    command: [params.shell, ...params.args].join(" "),
+    cwd: params.cwd,
+    timedOut: false,
   });
 
   let dataListener: PtyDisposable | null = null;
@@ -80,6 +92,15 @@ export async function createPtyAdapter(params: {
     }
     clearForceKillWaitFallback();
     waitResult = value;
+    logExecRuntimeLifecycle("adapter-pty-wait-settled", {
+      ...params.logContext,
+      pid: pty.pid || null,
+      command: [params.shell, ...params.args].join(" "),
+      cwd: params.cwd,
+      exitCode: value.code,
+      exitSignal: value.signal,
+      timedOut: false,
+    });
     if (resolveWait) {
       const resolve = resolveWait;
       resolveWait = null;
@@ -91,7 +112,23 @@ export async function createPtyAdapter(params: {
     clearForceKillWaitFallback();
     // Some PTY hosts fail to emit onExit after kill; use a delayed fallback
     // so callers can still unblock without marking termination immediately.
+    logExecRuntimeLifecycle("adapter-pty-kill-fallback-start", {
+      ...params.logContext,
+      pid: pty.pid || null,
+      command: [params.shell, ...params.args].join(" "),
+      cwd: params.cwd,
+      signal,
+      action: "fallback-settle",
+    });
     forceKillWaitFallbackTimer = setTimeout(() => {
+      logExecRuntimeLifecycle("adapter-pty-kill-fallback-fired", {
+        ...params.logContext,
+        pid: pty.pid || null,
+        command: [params.shell, ...params.args].join(" "),
+        cwd: params.cwd,
+        signal,
+        action: "fallback-settle",
+      });
       settleWait({ code: null, signal });
     }, FORCE_KILL_WAIT_FALLBACK_MS);
     forceKillWaitFallbackTimer.unref();
@@ -100,6 +137,15 @@ export async function createPtyAdapter(params: {
   exitListener =
     pty.onExit((event) => {
       const signal = event.signal && event.signal !== 0 ? event.signal : null;
+      logExecRuntimeLifecycle("adapter-pty-exit-event", {
+        ...params.logContext,
+        pid: pty.pid || null,
+        command: [params.shell, ...params.args].join(" "),
+        cwd: params.cwd,
+        exitCode: event.exitCode ?? null,
+        exitSignal: signal,
+        timedOut: false,
+      });
       settleWait({ code: event.exitCode ?? null, signal });
     }) ?? null;
 
@@ -154,12 +200,44 @@ export async function createPtyAdapter(params: {
   };
 
   const kill = (signal: NodeJS.Signals = "SIGKILL") => {
+    logExecRuntimeLifecycle("adapter-pty-kill", {
+      ...params.logContext,
+      pid: pty.pid || null,
+      command: [params.shell, ...params.args].join(" "),
+      cwd: params.cwd,
+      signal,
+      action: "kill",
+    });
     try {
       if (signal === "SIGKILL" && typeof pty.pid === "number" && pty.pid > 0) {
+        logExecRuntimeLifecycle("adapter-pty-kill-tree", {
+          ...params.logContext,
+          pid: pty.pid,
+          command: [params.shell, ...params.args].join(" "),
+          cwd: params.cwd,
+          signal,
+          action: "killProcessTree",
+        });
         killProcessTree(pty.pid);
       } else if (process.platform === "win32") {
+        logExecRuntimeLifecycle("adapter-pty-kill-direct", {
+          ...params.logContext,
+          pid: pty.pid || null,
+          command: [params.shell, ...params.args].join(" "),
+          cwd: params.cwd,
+          signal,
+          action: "pty.kill",
+        });
         pty.kill();
       } else {
+        logExecRuntimeLifecycle("adapter-pty-kill-direct", {
+          ...params.logContext,
+          pid: pty.pid || null,
+          command: [params.shell, ...params.args].join(" "),
+          cwd: params.cwd,
+          signal,
+          action: "pty.kill",
+        });
         pty.kill(signal);
       }
     } catch {

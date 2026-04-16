@@ -2,6 +2,10 @@ import type { ChildProcessWithoutNullStreams, SpawnOptions } from "node:child_pr
 import { killProcessTree } from "../../kill-tree.js";
 import { spawnWithFallback } from "../../spawn-utils.js";
 import { resolveWindowsCommandShim } from "../../windows-command.js";
+import {
+  type ExecLifecycleFields,
+  logExecRuntimeLifecycle,
+} from "../lifecycle-log.runtime.js";
 import type { ManagedRunStdin, SpawnProcessAdapter } from "../types.js";
 import { toStringEnv } from "./env.js";
 
@@ -28,6 +32,7 @@ export async function createChildAdapter(params: {
   windowsVerbatimArguments?: boolean;
   input?: string;
   stdinMode?: "inherit" | "pipe-open" | "pipe-closed";
+  logContext?: ExecLifecycleFields;
 }): Promise<ChildAdapter> {
   const resolvedArgv = [...params.argv];
   resolvedArgv[0] = resolveCommand(resolvedArgv[0] ?? "");
@@ -67,6 +72,15 @@ export async function createChildAdapter(params: {
   });
 
   const child = spawned.child as ChildProcessWithoutNullStreams;
+  logExecRuntimeLifecycle("adapter-child-started", {
+    ...params.logContext,
+    pid: child.pid ?? null,
+    command: resolvedArgv.join(" "),
+    cwd: params.cwd,
+    detached: useDetached,
+    stdinMode,
+    timedOut: false,
+  });
   if (child.stdin) {
     if (params.input !== undefined) {
       child.stdin.write(params.input);
@@ -151,6 +165,15 @@ export async function createChildAdapter(params: {
     clearForceKillWaitFallback();
     clearWindowsCloseFallbackTimer();
     waitResult = value;
+    logExecRuntimeLifecycle("adapter-child-wait-settled", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      exitCode: value.code,
+      exitSignal: value.signal,
+      timedOut: false,
+    });
     if (resolveWait) {
       const resolve = resolveWait;
       resolveWait = null;
@@ -166,6 +189,14 @@ export async function createChildAdapter(params: {
     clearForceKillWaitFallback();
     clearWindowsCloseFallbackTimer();
     waitError = error;
+    logExecRuntimeLifecycle("adapter-child-wait-error", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      reason: String(error),
+      timedOut: false,
+    });
     if (rejectWait) {
       const reject = rejectWait;
       resolveWait = null;
@@ -177,7 +208,23 @@ export async function createChildAdapter(params: {
   const scheduleForceKillWaitFallback = (signal: NodeJS.Signals) => {
     clearForceKillWaitFallback();
     // Some Windows child processes never emit `close` after a hard kill.
+    logExecRuntimeLifecycle("adapter-child-kill-fallback-start", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      signal,
+      action: "fallback-settle",
+    });
     forceKillWaitFallbackTimer = setTimeout(() => {
+      logExecRuntimeLifecycle("adapter-child-kill-fallback-fired", {
+        ...params.logContext,
+        pid: child.pid ?? null,
+        command: resolvedArgv.join(" "),
+        cwd: params.cwd,
+        signal,
+        action: "fallback-settle",
+      });
       settleWait({ code: null, signal });
     }, FORCE_KILL_WAIT_FALLBACK_MS);
     forceKillWaitFallbackTimer.unref?.();
@@ -237,13 +284,39 @@ export async function createChildAdapter(params: {
   });
 
   child.once("error", (error) => {
+    logExecRuntimeLifecycle("adapter-child-error", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      reason: String(error),
+      timedOut: false,
+    });
     rejectPendingWait(error);
   });
   child.once("exit", (code, signal) => {
     childExitState = { code, signal };
+    logExecRuntimeLifecycle("adapter-child-exit-event", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      exitCode: code,
+      exitSignal: signal,
+      timedOut: false,
+    });
     scheduleWindowsCloseFallback();
   });
   child.once("close", (code, signal) => {
+    logExecRuntimeLifecycle("adapter-child-close-event", {
+      ...params.logContext,
+      pid: child.pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      exitCode: code,
+      exitSignal: signal,
+      timedOut: false,
+    });
     settleWait(resolveObservedExitState({ code, signal }));
   });
 
@@ -280,11 +353,35 @@ export async function createChildAdapter(params: {
 
   const kill = (signal?: NodeJS.Signals) => {
     const pid = child.pid ?? undefined;
+    logExecRuntimeLifecycle("adapter-child-kill", {
+      ...params.logContext,
+      pid: pid ?? null,
+      command: resolvedArgv.join(" "),
+      cwd: params.cwd,
+      signal: signal ?? "SIGKILL",
+      action: "kill",
+    });
     if (signal === undefined || signal === "SIGKILL") {
       if (pid) {
+        logExecRuntimeLifecycle("adapter-child-kill-tree", {
+          ...params.logContext,
+          pid,
+          command: resolvedArgv.join(" "),
+          cwd: params.cwd,
+          signal: "SIGKILL",
+          action: "killProcessTree",
+        });
         killProcessTree(pid);
       }
       try {
+        logExecRuntimeLifecycle("adapter-child-kill-direct", {
+          ...params.logContext,
+          pid: pid ?? null,
+          command: resolvedArgv.join(" "),
+          cwd: params.cwd,
+          signal: "SIGKILL",
+          action: "child.kill",
+        });
         child.kill("SIGKILL");
       } catch {
         // ignore kill errors
@@ -293,6 +390,14 @@ export async function createChildAdapter(params: {
       return;
     }
     try {
+      logExecRuntimeLifecycle("adapter-child-kill-direct", {
+        ...params.logContext,
+        pid: pid ?? null,
+        command: resolvedArgv.join(" "),
+        cwd: params.cwd,
+        signal,
+        action: "child.kill",
+      });
       child.kill(signal);
     } catch {
       // ignore kill errors for non-kill signals

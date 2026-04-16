@@ -25,6 +25,7 @@ export {
 import { logWarn } from "../logger.js";
 import type { ManagedRun } from "../process/supervisor/index.js";
 import { getProcessSupervisor } from "../process/supervisor/index.js";
+import { logExecRuntimeLifecycle } from "../process/supervisor/lifecycle-log.runtime.js";
 import type { RunExit, TerminationReason } from "../process/supervisor/types.js";
 import { normalizeDeliveryContext, type DeliveryContext } from "../utils/delivery-context.js";
 import {
@@ -622,6 +623,21 @@ export async function runExecProcess(opts: {
       : undefined;
   let sandboxFinalizeToken: unknown;
 
+  logExecRuntimeLifecycle("exec-process-prepare", {
+    runId: sessionId,
+    sessionId,
+    pid: null,
+    command: opts.command,
+    cwd: opts.workdir,
+    timeoutSec: opts.timeoutSec,
+    timeoutMs,
+    usePty: opts.usePty,
+    sandboxed: Boolean(opts.sandbox),
+    backgrounded: false,
+    yielded: false,
+    timedOut: false,
+  });
+
   const spawnSpec:
     | {
         mode: "child";
@@ -726,6 +742,20 @@ export async function runExecProcess(opts: {
             stdinMode: spawnSpec.stdinMode,
           });
   } catch (err) {
+    logExecRuntimeLifecycle("exec-process-spawn-error", {
+      runId: sessionId,
+      sessionId,
+      pid: null,
+      command: opts.command,
+      cwd: opts.workdir,
+      timeoutSec: opts.timeoutSec,
+      timeoutMs,
+      mode: spawnSpec.mode,
+      reason: String(err),
+      backgrounded: session.backgrounded,
+      yielded: false,
+      timedOut: false,
+    });
     if (spawnSpec.mode === "pty") {
       const warning = `Warning: PTY spawn failed (${String(err)}); retrying without PTY for \`${opts.command}\`.`;
       logWarn(
@@ -734,6 +764,20 @@ export async function runExecProcess(opts: {
       opts.warnings.push(warning);
       usingPty = false;
       try {
+        logExecRuntimeLifecycle("exec-process-pty-fallback-start", {
+          runId: sessionId,
+          sessionId,
+          pid: null,
+          command: opts.command,
+          cwd: opts.workdir,
+          timeoutSec: opts.timeoutSec,
+          timeoutMs,
+          mode: "child",
+          reason: "pty-spawn-failed",
+          backgrounded: session.backgrounded,
+          yielded: false,
+          timedOut: false,
+        });
         managedRun = await supervisor.spawn({
           runId: sessionId,
           sessionId: opts.sessionKey?.trim() || sessionId,
@@ -750,6 +794,20 @@ export async function runExecProcess(opts: {
           onStderr: handleStderr,
         });
       } catch (retryErr) {
+        logExecRuntimeLifecycle("exec-process-pty-fallback-error", {
+          runId: sessionId,
+          sessionId,
+          pid: null,
+          command: opts.command,
+          cwd: opts.workdir,
+          timeoutSec: opts.timeoutSec,
+          timeoutMs,
+          mode: "child",
+          reason: String(retryErr),
+          backgrounded: session.backgrounded,
+          yielded: false,
+          timedOut: false,
+        });
         markExited(session, null, null, "failed");
         maybeNotifyOnExit(session, "failed");
         throw retryErr;
@@ -762,6 +820,19 @@ export async function runExecProcess(opts: {
   }
   session.stdin = managedRun.stdin;
   session.pid = managedRun.pid;
+  logExecRuntimeLifecycle("exec-process-started", {
+    runId: sessionId,
+    sessionId,
+    pid: session.pid,
+    command: opts.command,
+    cwd: opts.workdir,
+    timeoutSec: opts.timeoutSec,
+    timeoutMs,
+    mode: usingPty ? "pty" : "child",
+    backgrounded: session.backgrounded,
+    yielded: false,
+    timedOut: false,
+  });
 
   const promise = managedRun
     .wait()
@@ -780,6 +851,22 @@ export async function runExecProcess(opts: {
       });
 
       markExited(session, exit.exitCode, exit.exitSignal, outcome.status);
+      logExecRuntimeLifecycle("exec-process-exit", {
+        runId: sessionId,
+        sessionId,
+        pid: session.pid,
+        command: opts.command,
+        cwd: opts.workdir,
+        timeoutSec: opts.timeoutSec,
+        timeoutMs,
+        reason: exit.reason,
+        exitCode: exit.exitCode,
+        exitSignal: exit.exitSignal,
+        status: outcome.status,
+        timedOut: exit.timedOut,
+        backgrounded: session.backgrounded,
+        yielded: session.backgrounded,
+      });
       maybeNotifyOnExit(session, outcome.status);
       if (!session.child && session.stdin) {
         session.stdin.destroyed = true;
@@ -797,6 +884,21 @@ export async function runExecProcess(opts: {
     .catch((err): ExecProcessOutcome => {
       updatesDisabled = true;
       markExited(session, null, null, "failed");
+      logExecRuntimeLifecycle("exec-process-runtime-error", {
+        runId: sessionId,
+        sessionId,
+        pid: session.pid,
+        command: opts.command,
+        cwd: opts.workdir,
+        timeoutSec: opts.timeoutSec,
+        timeoutMs,
+        reason: String(err),
+        exitCode: null,
+        exitSignal: null,
+        timedOut: false,
+        backgrounded: session.backgrounded,
+        yielded: session.backgrounded,
+      });
       maybeNotifyOnExit(session, "failed");
       return buildExecRuntimeErrorOutcome({
         error: err,
@@ -811,10 +913,33 @@ export async function runExecProcess(opts: {
     pid: session.pid ?? undefined,
     promise,
     kill: () => {
+      logExecRuntimeLifecycle("exec-process-kill-request", {
+        runId: sessionId,
+        sessionId,
+        pid: session.pid,
+        command: opts.command,
+        cwd: opts.workdir,
+        timeoutSec: opts.timeoutSec,
+        timeoutMs,
+        reason: "manual-cancel",
+        backgrounded: session.backgrounded,
+        yielded: session.backgrounded,
+        timedOut: false,
+      });
       managedRun?.cancel("manual-cancel");
     },
     disableUpdates: () => {
       updatesDisabled = true;
+      logExecRuntimeLifecycle("exec-process-updates-disabled", {
+        runId: sessionId,
+        sessionId,
+        pid: session.pid,
+        command: opts.command,
+        cwd: opts.workdir,
+        reason: "abort-or-settle",
+        backgrounded: session.backgrounded,
+        yielded: session.backgrounded,
+      });
     },
   };
 }

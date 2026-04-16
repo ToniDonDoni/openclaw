@@ -10,6 +10,7 @@ import {
   resolveShellEnvFallbackTimeoutMs,
 } from "../infra/shell-env.js";
 import { logInfo } from "../logger.js";
+import { logExecRuntimeLifecycle } from "../process/supervisor/lifecycle-log.runtime.js";
 import { parseAgentSessionKey, resolveAgentIdFromSessionKey } from "../routing/session-key.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -1660,6 +1661,26 @@ export function createExecTool(
       // before we execute and burn tokens in cron loops.
       await validateScriptFileForShellBleed({ command: params.command, workdir });
 
+      logExecRuntimeLifecycle("exec-tool-start-request", {
+        runId: null,
+        sessionId: notifySessionKey,
+        pid: null,
+        command: params.command,
+        cwd: workdir,
+        timeoutSec: effectiveTimeout,
+        timeoutMs:
+          typeof effectiveTimeout === "number" && effectiveTimeout > 0
+            ? Math.floor(effectiveTimeout * 1000)
+            : null,
+        yieldMs: params.yieldMs,
+        yieldWindow,
+        backgroundRequested,
+        yielded: false,
+        backgrounded: false,
+        timedOut: false,
+        host,
+        usePty,
+      });
       const run = await runExecProcess({
         command: params.command,
         execCommand: execCommandOverride,
@@ -1685,6 +1706,20 @@ export function createExecTool(
 
       // Tool-call abort should not kill backgrounded sessions; timeouts still must.
       const onAbortSignal = () => {
+        logExecRuntimeLifecycle("exec-tool-abort-signal", {
+          runId: run.session.id,
+          sessionId: notifySessionKey,
+          pid: run.session.pid,
+          command: params.command,
+          cwd: run.session.cwd,
+          timeoutSec: effectiveTimeout,
+          yieldMs: params.yieldMs,
+          yieldWindow,
+          reason: "abort-signal",
+          backgrounded: run.session.backgrounded,
+          yielded,
+          timedOut: false,
+        });
         // Immediately suppress onUpdate calls so that any late stdout/stderr
         // from the still-running process cannot push a rejected Promise into
         // pi-agent-core's updateEvents after the agent run has ended (#62520).
@@ -1694,14 +1729,58 @@ export function createExecTool(
         // retrieve output via process poll/log instead of onUpdate callbacks).
         run.disableUpdates();
         if (yielded || run.session.backgrounded) {
+          logExecRuntimeLifecycle("exec-tool-abort-preserve-background", {
+            runId: run.session.id,
+            sessionId: notifySessionKey,
+            pid: run.session.pid,
+            command: params.command,
+            cwd: run.session.cwd,
+            reason: "abort-signal-backgrounded",
+            backgrounded: run.session.backgrounded,
+            yielded,
+            timedOut: false,
+          });
           return;
         }
+        logExecRuntimeLifecycle("exec-tool-abort-kill", {
+          runId: run.session.id,
+          sessionId: notifySessionKey,
+          pid: run.session.pid,
+          command: params.command,
+          cwd: run.session.cwd,
+          reason: "abort-signal-foreground",
+          backgrounded: run.session.backgrounded,
+          yielded,
+          timedOut: false,
+        });
         run.kill();
       };
 
       if (signal?.aborted) {
+        logExecRuntimeLifecycle("exec-tool-abort-preexisting", {
+          runId: run.session.id,
+          sessionId: notifySessionKey,
+          pid: run.session.pid,
+          command: params.command,
+          cwd: run.session.cwd,
+          reason: "signal-already-aborted",
+          backgrounded: run.session.backgrounded,
+          yielded,
+          timedOut: false,
+        });
         onAbortSignal();
       } else if (signal) {
+        logExecRuntimeLifecycle("exec-tool-abort-listener-add", {
+          runId: run.session.id,
+          sessionId: notifySessionKey,
+          pid: run.session.pid,
+          command: params.command,
+          cwd: run.session.cwd,
+          reason: "signal-listener-registered",
+          backgrounded: run.session.backgrounded,
+          yielded,
+          timedOut: false,
+        });
         signal.addEventListener("abort", onAbortSignal, { once: true });
       }
 
@@ -1729,12 +1808,38 @@ export function createExecTool(
         const onYieldNow = () => {
           if (yieldTimer) {
             clearTimeout(yieldTimer);
+            logExecRuntimeLifecycle("exec-tool-yield-timer-clear", {
+              runId: run.session.id,
+              sessionId: notifySessionKey,
+              pid: run.session.pid,
+              command: params.command,
+              cwd: run.session.cwd,
+              reason: "yield-now",
+              yieldMs: params.yieldMs,
+              yieldWindow,
+              backgrounded: run.session.backgrounded,
+              yielded,
+              timedOut: false,
+            });
           }
           if (yielded) {
             return;
           }
           yielded = true;
           markBackgrounded(run.session);
+          logExecRuntimeLifecycle("exec-tool-backgrounded", {
+            runId: run.session.id,
+            sessionId: notifySessionKey,
+            pid: run.session.pid,
+            command: params.command,
+            cwd: run.session.cwd,
+            reason: yieldWindow === 0 ? "background-requested" : "yield-now",
+            yieldMs: params.yieldMs,
+            yieldWindow,
+            backgrounded: true,
+            yielded: true,
+            timedOut: false,
+          });
           resolveRunning();
         };
 
@@ -1742,12 +1847,37 @@ export function createExecTool(
           if (yieldWindow === 0) {
             onYieldNow();
           } else {
+            logExecRuntimeLifecycle("exec-tool-yield-timer-start", {
+              runId: run.session.id,
+              sessionId: notifySessionKey,
+              pid: run.session.pid,
+              command: params.command,
+              cwd: run.session.cwd,
+              yieldMs: params.yieldMs,
+              yieldWindow,
+              backgrounded: run.session.backgrounded,
+              yielded,
+              timedOut: false,
+            });
             yieldTimer = setTimeout(() => {
               if (yielded) {
                 return;
               }
               yielded = true;
               markBackgrounded(run.session);
+              logExecRuntimeLifecycle("exec-tool-backgrounded", {
+                runId: run.session.id,
+                sessionId: notifySessionKey,
+                pid: run.session.pid,
+                command: params.command,
+                cwd: run.session.cwd,
+                reason: "yield-timer",
+                yieldMs: params.yieldMs,
+                yieldWindow,
+                backgrounded: true,
+                yielded: true,
+                timedOut: false,
+              });
               resolveRunning();
             }, yieldWindow);
           }
@@ -1757,10 +1887,36 @@ export function createExecTool(
           .then((outcome) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
+              logExecRuntimeLifecycle("exec-tool-yield-timer-clear", {
+                runId: run.session.id,
+                sessionId: notifySessionKey,
+                pid: run.session.pid,
+                command: params.command,
+                cwd: run.session.cwd,
+                reason: "process-settled",
+                yieldMs: params.yieldMs,
+                yieldWindow,
+                backgrounded: run.session.backgrounded,
+                yielded,
+                timedOut: outcome.timedOut,
+              });
             }
             if (yielded || run.session.backgrounded) {
               return;
             }
+            logExecRuntimeLifecycle("exec-tool-foreground-resolve", {
+              runId: run.session.id,
+              sessionId: notifySessionKey,
+              pid: run.session.pid,
+              command: params.command,
+              cwd: run.session.cwd,
+              exitCode: outcome.exitCode,
+              exitSignal: outcome.exitSignal,
+              status: outcome.status,
+              backgrounded: false,
+              yielded: false,
+              timedOut: outcome.timedOut,
+            });
             resolve(
               buildExecForegroundResult({
                 outcome,
@@ -1772,10 +1928,34 @@ export function createExecTool(
           .catch((err) => {
             if (yieldTimer) {
               clearTimeout(yieldTimer);
+              logExecRuntimeLifecycle("exec-tool-yield-timer-clear", {
+                runId: run.session.id,
+                sessionId: notifySessionKey,
+                pid: run.session.pid,
+                command: params.command,
+                cwd: run.session.cwd,
+                reason: "process-rejected",
+                yieldMs: params.yieldMs,
+                yieldWindow,
+                backgrounded: run.session.backgrounded,
+                yielded,
+                timedOut: false,
+              });
             }
             if (yielded || run.session.backgrounded) {
               return;
             }
+            logExecRuntimeLifecycle("exec-tool-foreground-reject", {
+              runId: run.session.id,
+              sessionId: notifySessionKey,
+              pid: run.session.pid,
+              command: params.command,
+              cwd: run.session.cwd,
+              reason: String(err),
+              backgrounded: false,
+              yielded: false,
+              timedOut: false,
+            });
             reject(err as Error);
           });
       });
