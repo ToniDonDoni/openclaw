@@ -24,6 +24,9 @@ LOG_DIR="$STAND_DIR/logs"
 OPENCLAW_LOG="$LOG_DIR/openclaw.log"
 TG_LOG="$LOG_DIR/tg-mock.log"
 TEST_DONE_SLEEP_SEC="${TEST_DONE_SLEEP_SEC:-45}"
+# Regression scenario: this fires when normal heartbeat cadence is disabled
+# with heartbeat.every=0m. A background exec completion must still trigger an
+# event-driven wake and deliver the command output back to the original chat.
 MSG="${1:-Start /tmp/done with a 60 second timeout. It is likely to run about 10 seconds. You may return once it has started, but I still need the exact command output when it finishes.}"
 WAIT_SECONDS="${WAIT_SECONDS:-120}"
 MIN_REPLY_MS="${MIN_REPLY_MS:-$((TEST_DONE_SLEEP_SEC * 1000))}"

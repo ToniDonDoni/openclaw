@@ -332,7 +332,7 @@ describe("startHeartbeatRunner", () => {
     runner.stop();
   });
 
-  it("dispatches session-scoped exec wakes even when heartbeat cadence is disabled", async () => {
+  it("dispatches session-scoped exec wakes when heartbeat every=0m disables cadence", async () => {
     useFakeHeartbeatTime();
     const runSpy = vi.fn().mockResolvedValue({ status: "ran", durationMs: 1 });
     const runner = await expectWakeDispatch({

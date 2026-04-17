@@ -1594,7 +1594,7 @@ describe("runHeartbeatOnce", () => {
     }
   });
 
-  it("relays exec events with captured delivery context when heartbeat cadence is disabled", async () => {
+  it("relays exec events with captured delivery context when heartbeat every=0m disables cadence", async () => {
     const tmpDir = await createCaseDir("hb-exec-disabled-cadence-delivery");
     const storePath = path.join(tmpDir, "sessions.json");
     const cfg: OpenClawConfig = {
