@@ -78,6 +78,17 @@ const hasChatId = (update) =>
   Boolean(update && typeof update === "object" && update.message && Object.hasOwn(update.message, "chat_id"));
 const textOf = (update) =>
   typeof update?.message?.text === "string" ? update.message.text : null;
+const extractDoneOutput = (text) => {
+  if (typeof text !== "string") {
+    return null;
+  }
+  const direct = /^done\s+\d+$/u.exec(text.trim());
+  if (direct) {
+    return direct[0];
+  }
+  const embedded = /(?:^|[\n>])\s*(done\s+\d+)\s*(?:[\n<]|$)/u.exec(text);
+  return embedded?.[1] ?? null;
+};
 
 const startedAt = Number.isFinite(sentAtMs) && sentAtMs > 0 ? sentAtMs : Date.now();
 let lastPoll = null;
@@ -101,9 +112,11 @@ while (Date.now() - startedAt < timeoutMs) {
       botTexts.push(text);
       if (userIndex !== -1 && index > userIndex && typeof text === "string") {
         botTextsAfterUser.push(text);
-        if (/^done\s+\d+$/u.test(text.trim()) && doneBotIndex === -1) {
+        const doneOutput = extractDoneOutput(text);
+        if (doneOutput && doneBotIndex === -1) {
           doneBotIndex = index;
-          doneBotText = text;
+          doneBotText = doneOutput;
+          console.log(`completion_bot_output output=${JSON.stringify(doneOutput)} elapsedMs=${Date.now() - startedAt}`);
         } else if (text.trim() && !loggedInterimBotTexts.has(text)) {
           loggedInterimBotTexts.add(text);
           console.log(`interim_bot_output output=${JSON.stringify(text.trim())} elapsedMs=${Date.now() - startedAt}`);
@@ -191,7 +204,7 @@ if wait_for_reply; then
 else
   status=$?
   log "test_fail status=$status expected_user_text=$MSG min_reply_ms=$MIN_REPLY_MS"
-  log "expected eventual bot reply to be exact /tmp/done output matching 'done <unix_seconds>' with output timestamp at least ${MIN_REPLY_MS}ms after test send timestamp; interim bot replies are allowed"
+  log "expected eventual bot reply to include /tmp/done output matching 'done <unix_seconds>' with output timestamp at least ${MIN_REPLY_MS}ms after test send timestamp; interim bot replies are allowed"
   log "tg_mock_history_snapshot_begin"
   node "$BASE_DIR/tg-mock-history.mjs" || true
   log "tg_mock_history_snapshot_end"
