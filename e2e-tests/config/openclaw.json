@@ -15,10 +15,7 @@
       "models": {
         "openai-codex/gpt-5.4": {}
       },
-      "workspace": "/work/e2e-openclaw/workspace",
-      "heartbeat": {
-        "every": "0m"
-      }
+      "workspace": "/work/e2e-openclaw/workspace"
     }
   },
   "commands": {
