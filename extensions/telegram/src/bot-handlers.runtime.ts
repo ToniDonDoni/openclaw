@@ -1025,46 +1025,11 @@ export const registerTelegramHandlers = ({
   });
 
   const buildPromptContextForMessage = (
-    msg: Message,
-    replyChainNodes: TelegramCachedMessageNode[],
-    options?: TelegramMessageContextOptions,
+    _msg: Message,
+    _replyChainNodes: TelegramCachedMessageNode[],
+    _options?: TelegramMessageContextOptions,
   ): TelegramPromptContextEntry[] => {
-    const messageId = typeof msg.message_id === "number" ? String(msg.message_id) : undefined;
-    const currentNode = messageCache.get({
-      accountId,
-      chatId: msg.chat.id,
-      messageId,
-    });
-    const threadId = currentNode?.threadId ? Number(currentNode.threadId) : undefined;
-    const conversationContext = buildTelegramConversationContext({
-      cache: messageCache,
-      messageId,
-      accountId,
-      chatId: msg.chat.id,
-      ...(Number.isFinite(threadId) ? { threadId } : {}),
-      replyChainNodes,
-      recentLimit: 10,
-      replyTargetWindowSize: 2,
-      ...(options?.promptContextMinTimestampMs !== undefined
-        ? { minTimestampMs: options.promptContextMinTimestampMs }
-        : {}),
-    });
-    return conversationContext.length > 0
-      ? [
-          {
-            label: "Conversation context",
-            source: "telegram",
-            type: "chat_window",
-            payload: {
-              order: "chronological",
-              relation: "selected_for_current_message",
-              messages: conversationContext.map((entry) =>
-                toPromptContextMessage(entry.node, { replyTarget: entry.isReplyTarget }),
-              ),
-            },
-          },
-        ]
-      : [];
+    return [];
   };
 
   const resolveReplyMediaForChain = async (
